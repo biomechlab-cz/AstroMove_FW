@@ -25,12 +25,18 @@ STM32L462RETx (LQFP64), 80 MHz, STM32CubeIDE project.
 Disabled in main.c (not yet needed): QUADSPI, USB, I2C2.  
 I2C2 permanently disabled — PB11 repurposed as TPS_ON GPIO.
 
+## Active board: **04** (board 05 has dead MMC5983MA — see BOARD_SETUP.md)
+
 ## Tested / working
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | USART1 Hello World | in progress | 115200 8N1, ST-Link V3 MINI virtual COM |
-| SDMMC1 + FatFS write | working | 1-bit mode, ClockDiv=10, GPIO_PULLUP/MEDIUM; D1-D3 suspected bad solder joints so staying in 1-bit |
+| SDMMC1 + FatFS write | working | 1-bit mode, ClockDiv=10, GPIO_PULLUP/MEDIUM; D1-D3 bad solder on board 05 |
+| ISM330DHCX (IMU) | working | I2C addr 0x6A, WHO_AM_I=0x6B, 208Hz ±2g/±250dps |
+| MMC5983MA (mag) | working | I2C addr 0x30, board 04 only; board 05 chip dead |
+| RV-3028-C7 (RTC) | working | I2C addr 0x52; time not yet set |
+| ADS1292R (ECG ADC) | working | SPI1, ID=0x53, CPOL=0 CPHA=1, 500kHz |
 
 ## SD card config notes
 - `SDMMC_BUS_WIDE_1B` permanently — D1/D2/D3 (PC9-PC11) suspected bad solder joints on Hirose DM3AT

@@ -1,0 +1,117 @@
+#include "ads1292.h"
+#include "main.h"
+
+/* CS = PC1 (ADS_SPI_CS), DRDY = PC0 (ADS_SPI_INT) */
+#define ADS_CS_LOW()    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_RESET)
+#define ADS_CS_HIGH()   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_SET)
+#define ADS_DRDY_LOW()  (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_0) == GPIO_PIN_RESET)
+
+static SPI_HandleTypeDef *_hspi;
+
+static void ads_cmd(uint8_t cmd)
+{
+    ADS_CS_LOW();
+    HAL_Delay(1);
+    HAL_SPI_Transmit(_hspi, &cmd, 1, 10);
+    HAL_Delay(1);
+    ADS_CS_HIGH();
+    HAL_Delay(2);
+}
+
+/* WREG: write one register. Applies reserved-bit masks per ADS1292R datasheet. */
+static void ads_wreg(uint8_t reg, uint8_t val)
+{
+    switch (reg) {
+        case 0x01: val = val & 0x87;          break;  /* CONFIG1 */
+        case 0x02: val = (val & 0xFB) | 0x80; break;  /* CONFIG2: bit7 must be 1 */
+        case 0x03: val = (val & 0xFD) | 0x10; break;  /* LOFF: bit4 must be 1 */
+        case 0x07: val = val & 0x3F;          break;  /* LOFFSENS */
+        case 0x08: val = val & 0x5F;          break;  /* LOFFSTAT */
+        case 0x09: val = val | 0x02;          break;  /* RESP1: bit1 must be 1 */
+        case 0x0A: val = (val & 0x87) | 0x01; break;  /* RESP2: bit0 must be 1 */
+        case 0x0B: val = val & 0x0F;          break;  /* GPIO */
+        default:                               break;
+    }
+    uint8_t tx[3] = { 0x40 | reg, 0x00, val };
+    ADS_CS_LOW();
+    HAL_Delay(1);
+    HAL_SPI_Transmit(_hspi, tx, 3, 10);
+    HAL_Delay(1);
+    ADS_CS_HIGH();
+    HAL_Delay(2);
+}
+
+void ADS1292_Init(SPI_HandleTypeDef *hspi)
+{
+    _hspi = hspi;
+    ADS_CS_HIGH();
+    HAL_Delay(100);
+    ads_cmd(0x06);  /* RESET */
+    HAL_Delay(100);
+    ads_cmd(0x11);  /* SDATAC — exit continuous mode so registers are accessible */
+    HAL_Delay(10);
+
+    /* Register configuration — based on ProtoCentral V/Ohm reference setup */
+    ads_wreg(0x01, 0x03);  /* CONFIG1:  1 kSPS output data rate */
+    HAL_Delay(10);
+    ads_wreg(0x02, 0xA0);  /* CONFIG2:  internal 2.42 V reference, lead-off comp off, test signal off */
+    HAL_Delay(10);
+    ads_wreg(0x03, 0x10);  /* LOFF:     DC lead-off detection, threshold 5% */
+    HAL_Delay(10);
+    ads_wreg(0x04, 0x40);  /* CH1SET:   PGA gain 4, normal electrode input */
+    HAL_Delay(10);
+    ads_wreg(0x05, 0x60);  /* CH2SET:   PGA gain 8, normal electrode input */
+    HAL_Delay(10);
+    ads_wreg(0x06, 0x00);  /* RLDSENS:  RLD channel routing off */
+    HAL_Delay(10);
+    ads_wreg(0x07, 0x0F);  /* LOFFSENS: lead-off detection on IN1P/IN1N/IN2P/IN2N */
+    HAL_Delay(10);
+    ads_wreg(0x09, 0xF2);  /* RESP1:    demodulator+modulator on, RLDREF internal, 32 kHz clock */
+    HAL_Delay(10);
+    ads_wreg(0x0A, 0x03);  /* RESP2:    clock output enabled, RLDREF internally generated */
+    HAL_Delay(10);
+}
+
+uint8_t ADS1292_ReadID(void)
+{
+    uint8_t tx[2] = { 0x20, 0x00 };  /* RREG addr=0x00, count-1=0 */
+    uint8_t rx = 0;
+    ADS_CS_LOW();
+    HAL_Delay(1);
+    HAL_SPI_Transmit(_hspi, tx, 2, 10);
+    HAL_SPI_Receive(_hspi,  &rx, 1, 10);
+    ADS_CS_HIGH();
+    return rx;
+}
+
+void ADS1292_StartContinuous(void)
+{
+    ads_cmd(0x08);  /* START */
+    ads_cmd(0x10);  /* RDATAC */
+}
+
+void ADS1292_Stop(void)
+{
+    ads_cmd(0x11);  /* SDATAC */
+    ads_cmd(0x0A);  /* STOP */
+}
+
+uint8_t ADS1292_ReadSample(ADS1292_Sample_t *s)
+{
+    uint32_t t0 = HAL_GetTick();
+    while (!ADS_DRDY_LOW()) {
+        if (HAL_GetTick() - t0 > 20) return 0;  /* timeout ~4ms at 250SPS */
+    }
+
+    uint8_t raw[9] = {0};
+    ADS_CS_LOW();
+    HAL_Delay(1);
+    HAL_SPI_Receive(_hspi, raw, 9, 50);
+    ADS_CS_HIGH();
+
+    s->status = ((uint32_t)raw[0] << 16) | ((uint32_t)raw[1] << 8) | raw[2];
+    /* sign-extend 24-bit two's complement to int32 */
+    s->ch1 = ((int32_t)(raw[3] << 24 | raw[4] << 16 | raw[5] << 8)) >> 8;
+    s->ch2 = ((int32_t)(raw[6] << 24 | raw[7] << 16 | raw[8] << 8)) >> 8;
+    return 1;
+}

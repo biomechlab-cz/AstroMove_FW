@@ -24,7 +24,10 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <string.h>
-#include "diskio.h"
+#include <stdio.h>
+#include "i2c_sensors.h"
+#include "ads1292.h"
+#include "sd_card.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -117,62 +120,52 @@ int main(void)
   // MX_USART1_UART_Init();
   MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
-  FRESULT res;
-  UINT bw;
-
-  /* Blink helper: n blinks at given ms interval, then 1s pause */
   #define BLINK(n, ms) do { \
     for (int _i = 0; _i < (n)*2; _i++) { \
       HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10); HAL_Delay(ms); } \
     HAL_Delay(1000); } while(0)
 
-  /* Power on SD card via TPS_ON (PB11) */
+  /* Power on all peripherals via TPS_ON */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_11, GPIO_PIN_SET);
-  HAL_Delay(1000);
+  HAL_Delay(500);
 
-  /* Step 1: HAL_SD_Init — 2 slow blinks if fails */
-  if (HAL_SD_Init(&hsd1) != HAL_OK)
-  {
-    while (1) { BLINK(2, 400); }
-  }
+  I2C_Sensors_Init(&hi2c1);
+  ADS1292_Init(&hspi1);
 
-  /* Step 2: Raw read in 1-bit mode — captures exact HAL error for debugger */
-  static volatile uint32_t sd_hal_error = 0;
-  static volatile HAL_StatusTypeDef sd_read_status = HAL_OK;
-  uint8_t __attribute__((aligned(4))) sdbuf[512];
+  HAL_Delay(500);  /* SD card needs ~1s total after power-on */
 
-  sd_read_status = HAL_SD_ReadBlocks(&hsd1, sdbuf, 0, 1, 5000);
-  sd_hal_error = hsd1.ErrorCode;
+  ISM330_Data_t    imu = {0};
+  RTC_Time_t       rtc = {0};
+  ADS1292_Sample_t ecg = {0};
+  uint8_t          ads_id;
 
-  if (sd_read_status != HAL_OK)
-  {
-    /* 3 blinks = 1-bit read failed, check sd_hal_error in debugger */
+  ISM330_ReadSample(&imu);
+  RV3028_ReadTime(&rtc);
+
+  ads_id = ADS1292_ReadID();
+  ADS1292_StartContinuous();
+  ADS1292_ReadSample(&ecg);
+  ADS1292_Stop();
+
+  /* Write a snapshot to SD card */
+  char log[512];
+  int  len = snprintf(log, sizeof(log),
+    "RTC  : 20%02X-%02X-%02X  %02X:%02X:%02X\r\n"
+    "Accel: X=%6d  Y=%6d  Z=%6d\r\n"
+    "Gyro : X=%6d  Y=%6d  Z=%6d\r\n"
+    "ECG  : id=0x%02X  stat=0x%06lX  ch1=%ld  ch2=%ld\r\n",
+    rtc.yr, rtc.mon, rtc.date, rtc.hr, rtc.min, rtc.sec,
+    imu.ax, imu.ay, imu.az,
+    imu.gx, imu.gy, imu.gz,
+    ads_id, ecg.status, ecg.ch1, ecg.ch2);
+
+  if (SD_Card_Init()) {
+    SD_Card_Write("sensors.txt", (uint8_t *)log, (uint32_t)len);
+    SD_Card_Deinit();
+  } else {
     while (1) { BLINK(3, 400); }
   }
 
-  /* Step 3: Mount filesystem — 5 blinks = filesystem not recognised */
-  res = f_mount(&SDFatFS, SDPath, 1);
-  if (res != FR_OK)
-  {
-    while (1) { BLINK(5, 400); }
-  }
-
-  /* Step 4: Open and write file — 6 blinks if fails */
-  res = f_open(&SDFile, "astro.txt", FA_CREATE_ALWAYS | FA_WRITE);
-  if (res == FR_OK)
-  {
-    const char *data = "Hello from AstroMowe!\r\n";
-    f_write(&SDFile, data, strlen(data), &bw);
-    f_close(&SDFile);
-  }
-  else
-  {
-    while (1) { BLINK(6, 400); }
-  }
-
-  f_mount(NULL, SDPath, 0);
-
-  /* 10 fast blinks = all steps succeeded */
   BLINK(10, 80);
 
   /* USER CODE END 2 */
@@ -397,17 +390,17 @@ static void MX_SPI1_Init(void)
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_MASTER;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_4BIT;
-  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;  /* CPOL=0: clock idles low */
+  hspi1.Init.CLKPhase = SPI_PHASE_2EDGE;      /* CPHA=1: sample on falling edge (ADS1292R mode 1) */
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_32; /* 16MHz/32 = 500kHz — safe for bring-up */
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
   hspi1.Init.CRCPolynomial = 7;
   hspi1.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
-  hspi1.Init.NSSPMode = SPI_NSS_PULSE_ENABLE;
+  hspi1.Init.NSSPMode = SPI_NSS_PULSE_DISABLE;
   if (HAL_SPI_Init(&hspi1) != HAL_OK)
   {
     Error_Handler();
