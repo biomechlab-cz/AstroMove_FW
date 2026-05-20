@@ -22,7 +22,7 @@ STM32L462RETx (LQFP64), 80 MHz, STM32CubeIDE project.
 | GPIO     | PC6  | SYNC_A (TBD) |
 | GPIO     | PC7  | SYNC_B (TBD) |
 
-Disabled in main.c (not yet needed): QUADSPI, SDMMC1, USB, I2C2.  
+Disabled in main.c (not yet needed): QUADSPI, USB, I2C2.  
 I2C2 permanently disabled — PB11 repurposed as TPS_ON GPIO.
 
 ## Tested / working
@@ -30,6 +30,14 @@ I2C2 permanently disabled — PB11 repurposed as TPS_ON GPIO.
 | Feature | Status | Notes |
 |---------|--------|-------|
 | USART1 Hello World | in progress | 115200 8N1, ST-Link V3 MINI virtual COM |
+| SDMMC1 + FatFS write | working | 1-bit mode, ClockDiv=10, GPIO_PULLUP/MEDIUM; D1-D3 suspected bad solder joints so staying in 1-bit |
+
+## SD card config notes
+- `SDMMC_BUS_WIDE_1B` permanently — D1/D2/D3 (PC9-PC11) suspected bad solder joints on Hirose DM3AT
+- `ClockDiv = 10` → 2.4 MHz (HSI48 source)
+- GPIO pull: `GPIO_PULLUP`, speed: `GPIO_SPEED_FREQ_MEDIUM` on all SDMMC pins
+- `DISABLE_SD_INIT` defined in sd_diskio.c — manual `HAL_SD_Init` in main.c before `f_mount`
+- Do NOT call `HAL_SD_ConfigWideBusOperation` — will break D0 reads if D1-D3 are flaky
 
 ## Build & flash
 STM32CubeIDE. Debug config: `NewProject Debug.launch`.
