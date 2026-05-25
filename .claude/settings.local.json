@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Read(//c/AstroMowe_base/**)",
-      "Bash(grep -v \"^$\")"
+      "Bash(grep -v \"^$\")",
+      "WebSearch"
     ]
   }
 }

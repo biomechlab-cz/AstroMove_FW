@@ -22,33 +22,31 @@ Lead-off detection for ADS1292R comes from bits [22:19] of the 24-bit status hea
 
 ---
 
-### Log file format — current: human-readable CSV
+### Log file format — InfluxDB line protocol
 
-**Temporary format for development and debugging.** Final format will likely be encrypted binary — swap when format is defined.
-
-One line per 10 ms frame:
+One line per ADS1292R sample, written in 1000-sample blocks (~1 s each):
 
 ```
-timestamp_ms,ads0,ads1,ads2,ads3,ads4,ads5,ads6,ads7,ads8,ads9,loff,ax,ay,az,gx,gy,gz,mx,my,mz
+ecg ch1=<signed_int>i,loff=<uint8>i <timestamp_ms>
 ```
 
-- `timestamp_ms` — ms since device power-on (uint32)
-- `ads0`…`ads9` — 10 ADS1292R CH1 samples as signed decimal integers
-- `loff` — lead-off status byte for the last of the 10 ADS samples (0 = electrodes on)
-- `ax ay az` — accelerometer X/Y/Z in raw ADC counts (int16)
-- `gx gy gz` — gyroscope X/Y/Z in raw ADC counts (int16)
-- `mx my mz` — magnetometer X/Y/Z in raw counts (uint32, 18-bit values)
+- `ch1` — 24-bit signed ADC count (CH1 only; CH2 not used yet)
+- `loff` — raw status byte from the 9-byte ADS frame (bits 22:19 are lead-off flags)
+- `timestamp_ms` — `HAL_GetTick()` value at the nearest 100-sample boundary + intra-group ms offset; starts from 0 at each boot
 
-Example line:
+File header (written by `ACQ_WriteDiagnostics`, ignored by InfluxDB):
 ```
-12340,1045,-230,870,...,0x03,512,-128,980,45,-22,100,131072,65536,98304
+# ID=53 CONFIG1=03 CONFIG2=A0 ... RESP1=F2 RESP2=03
+# DRDY_SDATAC=1 RDATA=C00000 ...
 ```
 
-File is opened once at boot, appended continuously, closed on graceful stop. Filename: `log_NNNN.csv` where NNNN is a boot counter stored in flash (incremented each power-on).
+Filename: `log_NNNN.lp` (NNNN increments by finding the first unused filename on the SD).
 
-`timestamp_ms` counts from device power-on. When Phase 2 sync is implemented, the counter resets to 0 at the sync trigger — all devices then share the same time base in their log files.
+Import command: `influx write --precision ms -f log_0000.lp`
 
-At 100 lines/s with ~120 chars/line: **~12 KB/s to SD** (slightly higher than binary but negligible for the SD).
+Visualisation: `python plot_ecg.py log_0000.lp` (see `plot_ecg.py` in project root).
+
+**Future:** when IMU data is added, a second measurement (`imu`) will be interleaved at 100 Hz. When Phase 2 sync is implemented, `timestamp_ms` will reset to 0 at the sync trigger so all devices share the same time base.
 
 ---
 
@@ -119,25 +117,35 @@ Key optimisation levers (in priority order):
 
 ```
 Startup
-├── Init sensors (ADS1292R, ISM330DHCX, MMC5983MA, RV-3028-C7 for wall time)
-├── Init SD, open log file
-└── Start ADS in RDATAC mode, enable DRDY interrupt
+├── ADS1292_Init (SPI, SDATAC, register config)
+├── TPS_ON → SD card power, 500 ms settle
+├── Arm PC0 as EXTI0 falling-edge (GPIO_PULLUP — DRDY is open-drain)
+├── ACQ_Init: SD 4-bit 480 kHz, f_mount, open log_NNNN.lp
+├── ACQ_WriteDiagnostics: register readback → log file header comments
+└── ADS1292_StartContinuous: START + RDATAC
 
-DRDY ISR (1 kHz)
-└── Read 9-byte ADS frame via SPI → store raw[3] status + raw[3] CH1 into frame slot
+EXTI0 ISR (fires on every DRDY falling edge, ~1 kHz)
+└── g_isr_count++; g_drdy_flag = 1
 
-SysTick / timer callback (100 Hz)
+Main loop
+├── ACQ_Process:
+│   ├── if !g_drdy_flag → return
+│   ├── g_drdy_flag = 0
+│   ├── ADS1292_ReadRaw (9 bytes, RDATAC mode)
+│   ├── store CH1 + loff + isr_count snapshot
+│   ├── capture HAL_GetTick() at every 100th sample
+│   └── when 1000 samples full → flush block to SD as LP lines, blink LED
+└── 1 Hz LED heartbeat toggle
+
+100 Hz IMU read  [NOT YET IMPLEMENTED]
 ├── Read ISM330DHCX burst (12 bytes)
 ├── Read MMC5983MA burst (9 bytes)
-├── Assemble completed frame (timestamp + 10 ADS slots + IMU + mag)
-└── Advance write pointer; if active half full → signal flush task
-
-Flush task (runs when signalled)
-├── Write 64 KB chunk to SD via FatFS f_write
-└── Swap halves
+└── Append imu measurement lines to log
 ```
 
-ADS interrupt timing is tight (1 kHz = 1 ms budget). Keep the ISR minimal — only DMA transfer or a short SPI read, nothing else. All frame assembly happens in the 100 Hz callback.
+**Current status (2026-05-25):** ADS1292R acquisition working at 1 kSPS via RDATAC + DRDY interrupt. 1000-sample blocks flush to SD every ~1 s in InfluxDB line-protocol format. Timing verified: `isr_count` increments by 1 per sample; `HAL_GetTick()` boundary snapshots confirm 100 samples = 100 ms. IMU acquisition not yet implemented.
+
+ADS interrupt timing is tight (1 kHz = 1 ms budget). Keep the ISR minimal — only flag set. All data read and frame assembly happens in the main loop.
 
 ---
 

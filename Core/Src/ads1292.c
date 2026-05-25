@@ -96,6 +96,55 @@ void ADS1292_Stop(void)
     ads_cmd(0x0A);  /* STOP */
 }
 
+void ADS1292_ExitRDATAC(void)
+{
+    ads_cmd(0x11);  /* SDATAC only — chip keeps converting, START pin stays HIGH */
+}
+
+uint8_t ADS1292_ReadReg(uint8_t reg)
+{
+    uint8_t tx[2] = { 0x20 | (reg & 0x1F), 0x00 };
+    uint8_t rx = 0;
+    ADS_CS_LOW();
+    HAL_Delay(1);
+    HAL_SPI_Transmit(_hspi, tx, 2, 10);
+    HAL_SPI_Receive(_hspi, &rx, 1, 10);
+    ADS_CS_HIGH();
+    HAL_Delay(2);
+    return rx;
+}
+
+void ADS1292_ReadRDATA(uint8_t buf[9])
+{
+    uint8_t cmd = 0x12;  /* RDATA: read one conversion result, SDATAC mode only */
+    ADS_CS_LOW();
+    HAL_Delay(1);
+    HAL_SPI_Transmit(_hspi, &cmd, 1, 10);
+    HAL_SPI_Receive(_hspi, buf, 9, 50);
+    ADS_CS_HIGH();
+    HAL_Delay(2);
+}
+
+void ADS1292_ReadRaw(uint8_t buf[9])
+{
+    ADS_CS_LOW();
+    /* tCSS ≥ 7.8 µs (4×tCLKIN at 512 kHz). ~200 iterations at 16 MHz ≈ 25 µs. */
+    for (volatile uint32_t i = 0; i < 200; i++) {}
+    HAL_SPI_Receive(_hspi, buf, 9, 50);
+    ADS_CS_HIGH();
+}
+
+void ADS1292_ReadRDATAFast(uint8_t buf[9])
+{
+    uint8_t cmd = 0x12;
+    ADS_CS_LOW();
+    /* tCSS ≥ 7.8µs (4×tCLKIN). ~200 iterations at 16 MHz ≈ 25µs. */
+    for (volatile uint32_t i = 0; i < 200; i++) {}
+    HAL_SPI_Transmit(_hspi, &cmd, 1, 10);
+    HAL_SPI_Receive(_hspi, buf, 9, 50);
+    ADS_CS_HIGH();
+}
+
 uint8_t ADS1292_ReadSample(ADS1292_Sample_t *s)
 {
     uint32_t t0 = HAL_GetTick();

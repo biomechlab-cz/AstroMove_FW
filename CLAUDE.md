@@ -3,7 +3,7 @@
 Full hardware context: [`../HARDWARE.md`](../HARDWARE.md)
 
 ## MCU
-STM32L462RETx (LQFP64), 80 MHz, STM32CubeIDE project.
+STM32L462RETx (LQFP64), **16 MHz HSI** (PLL disabled in current firmware), STM32CubeIDE project.
 
 ## Active peripherals
 
@@ -36,14 +36,14 @@ I2C2 permanently disabled — PB11 repurposed as TPS_ON GPIO.
 | ISM330DHCX (IMU) | working | I2C addr 0x6A, WHO_AM_I=0x6B, 208Hz ±2g/±250dps |
 | MMC5983MA (mag) | working | I2C addr 0x30, board 04 only; board 05 chip dead |
 | RV-3028-C7 (RTC) | working | I2C addr 0x52; time not yet set |
-| ADS1292R (ECG ADC) | working | SPI1, ID=0x53, CPOL=0 CPHA=1, 500kHz |
+| ADS1292R (ECG ADC) | working | SPI1, ID=0x53, CPOL=0 CPHA=1, 500 kHz, 1 kSPS (CONFIG1=0x83 HR=1); DRDY non-functional on board 04 — use SDATAC+RDATA polling; EMG capture confirmed |
 
 ## SD card config notes
-- `SDMMC_BUS_WIDE_1B` permanently — D1/D2/D3 (PC9-PC11) suspected bad solder joints on Hirose DM3AT
-- `ClockDiv = 10` → 2.4 MHz (HSI48 source)
-- GPIO pull: `GPIO_PULLUP`, speed: `GPIO_SPEED_FREQ_MEDIUM` on all SDMMC pins
-- `DISABLE_SD_INIT` defined in sd_diskio.c — manual `HAL_SD_Init` in main.c before `f_mount`
-- Do NOT call `HAL_SD_ConfigWideBusOperation` — will break D0 reads if D1-D3 are flaky
+- **4-bit 480 kHz validated** — `sd_init_4bit()` in `Core/Src/acquisition.c`; see BOARD_SETUP.md §6 for full findings
+- Init sequence: 1-bit ClockDiv=10 → GPIO VERY_HIGH → 4-bit → ClockDiv=50 (480 kHz)
+- `DISABLE_SD_INIT` defined in sd_diskio.c — `HAL_SD_Init` called manually before `f_mount`
+- Do NOT skip the GPIO speed override after `HAL_SD_Init` — MspInit leaves it at MEDIUM which is too slow for 4-bit
+- Do NOT use 4-bit at ClockDiv≤10 (2.4 MHz+) — 47 kΩ pull-ups fail at those speeds (see BOARD_SETUP.md §6)
 
 ## Build & flash
 STM32CubeIDE. Debug config: `NewProject Debug.launch`.

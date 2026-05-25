@@ -28,6 +28,7 @@
 #include "i2c_sensors.h"
 #include "ads1292.h"
 #include "sd_card.h"
+#include "acquisition.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -73,7 +74,6 @@ static void MX_I2C1_Init(void);
 static void MX_QUADSPI_Init(void);
 static void MX_SDMMC1_SD_Init(void);
 static void MX_SPI1_Init(void);
-static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -96,7 +96,7 @@ int main(void)
 
   /* MCU Configuration--------------------------------------------------------*/
 
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. *
   HAL_Init();
 
   /* USER CODE BEGIN Init */
@@ -117,56 +117,40 @@ int main(void)
   MX_QUADSPI_Init();
   MX_SDMMC1_SD_Init();
   MX_SPI1_Init();
-  // MX_USART1_UART_Init();
   MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
-  #define BLINK(n, ms) do { \
-    for (int _i = 0; _i < (n)*2; _i++) { \
-      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10); HAL_Delay(ms); } \
-    HAL_Delay(1000); } while(0)
 
-  /* Power on all peripherals via TPS_ON */
+  /* Init ADS1292R over SPI */
+  ADS1292_Init(&hspi1);
+
+  /* Power on SD card via TPS_ON, wait for card to stabilise */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_11, GPIO_PIN_SET);
   HAL_Delay(500);
 
-  I2C_Sensors_Init(&hi2c1);
-  ADS1292_Init(&hspi1);
+  /* Arm PC0 (DRDY) as falling-edge EXTI. DRDY is open-drain — pull-up required. */
+  GPIO_InitTypeDef exti_cfg = {0};
+  exti_cfg.Pin  = GPIO_PIN_0;
+  exti_cfg.Mode = GPIO_MODE_IT_FALLING;
+  exti_cfg.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOC, &exti_cfg);
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 1, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+  MODIFY_REG(SYSCFG->EXTICR[0], SYSCFG_EXTICR1_EXTI0, SYSCFG_EXTICR1_EXTI0_PC);
+  __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_0);
 
-  HAL_Delay(500);  /* SD card needs ~1s total after power-on */
-
-  ISM330_Data_t    imu = {0};
-  RTC_Time_t       rtc = {0};
-  ADS1292_Sample_t ecg = {0};
-  uint8_t          ads_id;
-
-  ISM330_ReadSample(&imu);
-  RV3028_ReadTime(&rtc);
-
-  ads_id = ADS1292_ReadID();
-  ADS1292_StartContinuous();
-  ADS1292_ReadSample(&ecg);
-  ADS1292_Stop();
-
-  /* Write a snapshot to SD card */
-  char log[512];
-  int  len = snprintf(log, sizeof(log),
-    "RTC  : 20%02X-%02X-%02X  %02X:%02X:%02X\r\n"
-    "Accel: X=%6d  Y=%6d  Z=%6d\r\n"
-    "Gyro : X=%6d  Y=%6d  Z=%6d\r\n"
-    "ECG  : id=0x%02X  stat=0x%06lX  ch1=%ld  ch2=%ld\r\n",
-    rtc.yr, rtc.mon, rtc.date, rtc.hr, rtc.min, rtc.sec,
-    imu.ax, imu.ay, imu.az,
-    imu.gx, imu.gy, imu.gz,
-    ads_id, ecg.status, ecg.ch1, ecg.ch2);
-
-  if (SD_Card_Init()) {
-    SD_Card_Write("sensors.txt", (uint8_t *)log, (uint32_t)len);
-    SD_Card_Deinit();
-  } else {
-    while (1) { BLINK(3, 400); }
+  /* Init SD (4-bit 480 kHz), open log file */
+  if (!ACQ_Init()) {
+      while (1) {
+          HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
+          HAL_Delay(100);
+      }
   }
 
-  BLINK(10, 80);
+  /* Write ADS register readback to log file header */
+  ACQ_WriteDiagnostics();
+
+  /* Enter RDATAC — ISR fires on every DRDY falling edge */
+  ADS1292_StartContinuous();
 
   /* USER CODE END 2 */
 
@@ -177,8 +161,14 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
-    HAL_Delay(1000);
+    ACQ_Process();
+
+    /* 1 Hz heartbeat — always visible so we know the main loop is alive */
+    static uint32_t s_led_tick = 0;
+    if (HAL_GetTick() - s_led_tick >= 1000) {
+        s_led_tick = HAL_GetTick();
+        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
+    }
 
   }
   /* USER CODE END 3 */
@@ -408,41 +398,6 @@ static void MX_SPI1_Init(void)
   /* USER CODE BEGIN SPI1_Init 2 */
 
   /* USER CODE END SPI1_Init 2 */
-
-}
-
-/**
-  * @brief USART1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART1_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART1_Init 0 */
-
-  /* USER CODE END USART1_Init 0 */
-
-  /* USER CODE BEGIN USART1_Init 1 */
-
-  /* USER CODE END USART1_Init 1 */
-  huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
-  huart1.Init.WordLength = UART_WORDLENGTH_8B;
-  huart1.Init.StopBits = UART_STOPBITS_1;
-  huart1.Init.Parity = UART_PARITY_NONE;
-  huart1.Init.Mode = UART_MODE_TX_RX;
-  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART1_Init 2 */
-
-  /* USER CODE END USART1_Init 2 */
 
 }
 

@@ -10,6 +10,10 @@ typedef struct {
 } ISM330_Data_t;
 
 typedef struct {
+    uint32_t mx, my, mz;  /* 18-bit unsigned counts, null-field offset = 2^17 = 131072 */
+} MMC5983_Data_t;
+
+typedef struct {
     uint8_t sec, min, hr;       /* BCD */
     uint8_t date, mon, yr;      /* BCD */
 } RTC_Time_t;
@@ -19,6 +23,9 @@ void    I2C_Sensors_Init(I2C_HandleTypeDef *hi2c);
 
 /* Returns 1 on success, 0 if sensor not responding. */
 uint8_t ISM330_ReadSample(ISM330_Data_t *out);
+
+/* Trigger single measurement and read 18-bit X/Y/Z. Returns 1 on success. */
+uint8_t MMC5983_ReadSample(MMC5983_Data_t *out);
 
 uint8_t RV3028_ReadTime(RTC_Time_t *out);
 uint8_t RV3028_SetTime(const RTC_Time_t *t);
