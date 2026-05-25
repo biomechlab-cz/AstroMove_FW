@@ -96,7 +96,7 @@ int main(void)
 
   /* MCU Configuration--------------------------------------------------------*/
 
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. *
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
@@ -123,6 +123,9 @@ int main(void)
   /* Init ADS1292R over SPI */
   ADS1292_Init(&hspi1);
 
+  /* Init I2C sensors — sets internal _hi2c pointer used by RTC/IMU/mag */
+  I2C_Sensors_Init(&hi2c1);
+
   /* Power on SD card via TPS_ON, wait for card to stabilise */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_11, GPIO_PIN_SET);
   HAL_Delay(500);
@@ -138,7 +141,7 @@ int main(void)
   MODIFY_REG(SYSCFG->EXTICR[0], SYSCFG_EXTICR1_EXTI0, SYSCFG_EXTICR1_EXTI0_PC);
   __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_0);
 
-  /* Init SD (4-bit 480 kHz), open log file */
+  /* Init SD (4-bit 480 kHz) */
   if (!ACQ_Init()) {
       while (1) {
           HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
@@ -146,8 +149,15 @@ int main(void)
       }
   }
 
-  /* Write ADS register readback to log file header */
+  /* Write ADS register readback + RTC start time to log file header */
   ACQ_WriteDiagnostics();
+
+  /* 1-second LED flash: 10 × 100 ms — visual "ready" before sampling starts */
+  for (int i = 0; i < 10; i++) {
+      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
+      HAL_Delay(100);
+  }
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
 
   /* Enter RDATAC — ISR fires on every DRDY falling edge */
   ADS1292_StartContinuous();

@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-/* Init: SD 4-bit 480 kHz, mount, open log_NNNN.csv.
+/* Init: SD 4-bit 480 kHz, mount, open log_NNNN.bin.
    Returns 1 on success, 0 on failure. */
 uint8_t ACQ_Init(void);
 

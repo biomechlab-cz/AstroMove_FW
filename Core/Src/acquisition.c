@@ -1,5 +1,6 @@
 #include "acquisition.h"
 #include "ads1292.h"
+#include "i2c_sensors.h"
 #include "main.h"
 #include "fatfs.h"
 #include <stdio.h>
@@ -44,34 +45,53 @@ static uint8_t sd_init_4bit(void)
     return sd_wait_transfer(500);
 }
 
-/* ---- ADS 1-second buffer ---- */
+/* ====================================================================
+ * Binary file format
+ *
+ * File header  — 32 bytes, written once at open:
+ *   [0..3]   magic "AMS1"
+ *   [4]      ADS ID register
+ *   [5..13]  ADS registers: cfg1,cfg2,loff,ch1set,ch2set,rldsens,loffsens,resp1,resp2 (9 bytes)
+ *   [14..19] RTC start time: sec,min,hr,date,mon,yr (BCD, from RV-3028-C7)
+ *   [20..31] reserved 0x00
+ *
+ * Data block   — 5048 bytes, appended once per 1000-sample batch:
+ *   [0..5]     RTC time at block flush: sec,min,hr,date,mon,yr (BCD)
+ *   [6..7]     reserved 0x00
+ *   [8..47]    uint32_t tick_snap[10]  — HAL_GetTick() at each 100-sample boundary (LE)
+ *   [48..4047] int32_t  ch1[1000]     — 24-bit ADC counts sign-extended to 32 bits (LE)
+ *   [4048..5047] uint8_t loff[1000]   — raw ADS status byte 0 (lead-off flags in bits 6:4)
+ *
+ * f_sync every 10 blocks (~10 s) so data survives power loss without ACQ_Stop.
+ *
+ * Python:  python plot_ecg.py log_NNNN.bin
+ * ==================================================================== */
 #define ADS_BUF_LEN    1000
-/* Worst-case LP line: "ecg ch1=-8388608i,loff=255i 4294967295\r\n" = 41 chars; 45 with margin */
-#define LP_LINE_MAX    45
+#define BLOCK_HDR_SIZE 32   /* file header, written once */
+#define BLOCK_SIZE     5048 /* per-batch data block (8-byte RTC header + 5040 data) */
 
+/* ---- sample buffers ---- */
 static int32_t  s_ch1[ADS_BUF_LEN];
 static uint8_t  s_loff[ADS_BUF_LEN];
-static uint32_t s_isr_snap[ADS_BUF_LEN];              /* g_isr_count at capture time */
-static uint32_t s_tick_snap[ADS_BUF_LEN / 100];       /* HAL_GetTick() at each 100-sample boundary */
-static char     s_wbuf[ADS_BUF_LEN * LP_LINE_MAX];    /* pre-formatted write buffer — single f_write */
+static uint32_t s_tick_snap[ADS_BUF_LEN / 100]; /* HAL_GetTick() at 100-sample boundaries */
 static uint16_t s_count = 0;
 
 /* ---- log file ---- */
-static FATFS  s_fs;
-static FIL    s_file;
+static FATFS   s_fs;
+static FIL     s_file;
 static uint8_t s_file_open = 0;
 
 static void find_log_name(char *buf, size_t sz)
 {
     for (uint16_t n = 0; n <= 9999; n++) {
-        snprintf(buf, sz, "log_%04u.lp", n);
+        snprintf(buf, sz, "log_%04u.bin", n);
         FILINFO fi;
         if (f_stat(buf, &fi) != FR_OK) return;
     }
 }
 
 /* ====================================================================
- * ISR path — DRDY falling edge sets g_drdy_flag; ACQ_Process reads it.
+ * ISR path
  * ==================================================================== */
 volatile uint32_t g_isr_count = 0;
 volatile uint8_t  g_drdy_flag = 0;
@@ -98,7 +118,6 @@ uint8_t ACQ_Init(void)
 
     char name[16];
     find_log_name(name, sizeof(name));
-
     if (f_open(&s_file, name, FA_CREATE_NEW | FA_WRITE) != FR_OK) return 0;
 
     s_file_open = 1;
@@ -109,57 +128,27 @@ void ACQ_WriteDiagnostics(void)
 {
     if (!s_file_open) return;
 
+    uint8_t hdr[BLOCK_HDR_SIZE] = {0};
+    hdr[0] = 'A'; hdr[1] = 'M'; hdr[2] = 'S'; hdr[3] = '1';
+    hdr[4]  = ADS1292_ReadReg(0x00); /* ID */
+    hdr[5]  = ADS1292_ReadReg(0x01); /* CONFIG1 */
+    hdr[6]  = ADS1292_ReadReg(0x02); /* CONFIG2 */
+    hdr[7]  = ADS1292_ReadReg(0x03); /* LOFF */
+    hdr[8]  = ADS1292_ReadReg(0x04); /* CH1SET */
+    hdr[9]  = ADS1292_ReadReg(0x05); /* CH2SET */
+    hdr[10] = ADS1292_ReadReg(0x06); /* RLDSENS */
+    hdr[11] = ADS1292_ReadReg(0x07); /* LOFFSENS */
+    hdr[12] = ADS1292_ReadReg(0x09); /* RESP1 */
+    hdr[13] = ADS1292_ReadReg(0x0A); /* RESP2 */
+    RTC_Time_t t = {0};
+    RV3028_ReadTime(&t); /* BCD; stays 0x00 on I2C failure */
+    hdr[14] = t.sec; hdr[15] = t.min; hdr[16] = t.hr;
+    hdr[17] = t.date; hdr[18] = t.mon; hdr[19] = t.yr;
+    /* [20..31] remain 0x00 */
+
     UINT bw;
-    char buf[192];
-    int  len;
-
-    /* Register readback */
-    uint8_t id       = ADS1292_ReadReg(0x00);
-    uint8_t config1  = ADS1292_ReadReg(0x01);
-    uint8_t config2  = ADS1292_ReadReg(0x02);
-    uint8_t loff     = ADS1292_ReadReg(0x03);
-    uint8_t ch1set   = ADS1292_ReadReg(0x04);
-    uint8_t ch2set   = ADS1292_ReadReg(0x05);
-    uint8_t rldsens  = ADS1292_ReadReg(0x06);
-    uint8_t loffsens = ADS1292_ReadReg(0x07);
-    uint8_t resp1    = ADS1292_ReadReg(0x09);
-    uint8_t resp2    = ADS1292_ReadReg(0x0A);
-
-    len = snprintf(buf, sizeof(buf),
-        "# ID=%02X CONFIG1=%02X CONFIG2=%02X LOFF=%02X"
-        " CH1SET=%02X CH2SET=%02X RLDSENS=%02X LOFFSENS=%02X"
-        " RESP1=%02X RESP2=%02X\r\n",
-        id, config1, config2, loff,
-        ch1set, ch2set, rldsens, loffsens,
-        resp1, resp2);
-    f_write(&s_file, buf, (UINT)len, &bw);
-    f_sync(&s_file);  /* flush now so register data is on disk even if the next steps hang */
-
-    /* DRDY check in SDATAC mode — START pin is tied high so ADS should be converting.
-       If drdy=0 here, the ADS is not outputting DRDY despite being configured correctly. */
-    uint32_t t0 = HAL_GetTick();
-    uint8_t  drdy = 0;
-    while (HAL_GetTick() - t0 < 100) {
-        if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_0) == GPIO_PIN_RESET) {
-            drdy = 1;
-            break;
-        }
-    }
-
-    /* Force-read one sample with RDATA command — works regardless of DRDY state.
-       Status word bytes [0-2] should start with 0xC... (0b1100xxxx). */
-    uint8_t rdata[9] = {0};
-    ADS1292_ReadRDATA(rdata);
-
-    len = snprintf(buf, sizeof(buf),
-        "# DRDY_SDATAC=%u"
-        " RDATA=%02X%02X%02X %02X%02X%02X %02X%02X%02X\r\n",
-        drdy,
-        rdata[0], rdata[1], rdata[2],
-        rdata[3], rdata[4], rdata[5],
-        rdata[6], rdata[7], rdata[8]);
-    f_write(&s_file, buf, (UINT)len, &bw);
-    f_sync(&s_file);
+    f_write(&s_file, hdr, sizeof(hdr), &bw);
+    f_sync(&s_file); /* sync once after header */
 }
 
 void ACQ_Process(void)
@@ -171,33 +160,41 @@ void ACQ_Process(void)
     uint8_t raw[9] = {0};
     ADS1292_ReadRaw(raw);
 
-    s_ch1[s_count]      = ((int32_t)((uint32_t)raw[3] << 24 |
-                                     (uint32_t)raw[4] << 16 |
-                                     (uint32_t)raw[5] << 8)) >> 8;
-    s_loff[s_count]     = raw[0];
-    s_isr_snap[s_count] = g_isr_count;
+    s_ch1[s_count]  = ((int32_t)((uint32_t)raw[3] << 24 |
+                                  (uint32_t)raw[4] << 16 |
+                                  (uint32_t)raw[5] << 8)) >> 8;
+    s_loff[s_count] = raw[0];
     if (s_count % 100 == 0)
         s_tick_snap[s_count / 100] = HAL_GetTick();
     s_count++;
 
     if (s_count >= ADS_BUF_LEN) {
-        /* Format all lines into s_wbuf first, then one f_write — eliminates per-call FatFS overhead. */
-        uint32_t pos = 0;
-        for (uint16_t i = 0; i < ADS_BUF_LEN; i++) {
-            uint32_t ts_ms = s_tick_snap[i / 100] + (i % 100);
-            pos += (uint32_t)snprintf(s_wbuf + pos, sizeof(s_wbuf) - pos,
-                                      "ecg ch1=%ldi,loff=%ui %lu\r\n",
-                                      (long)s_ch1[i], (unsigned)s_loff[i],
-                                      (unsigned long)ts_ms);
-        }
+        /* 8-byte RTC block header, then three raw array writes.
+           Total: 8 + 40 + 4000 + 1000 = 5048 bytes (~13 ms at 395 KB/s). */
+        uint8_t blk_hdr[8] = {0};
+        RTC_Time_t t = {0};
+        RV3028_ReadTime(&t);
+        blk_hdr[0] = t.sec; blk_hdr[1] = t.min; blk_hdr[2] = t.hr;
+        blk_hdr[3] = t.date; blk_hdr[4] = t.mon; blk_hdr[5] = t.yr;
+
         UINT bw;
-        f_write(&s_file, s_wbuf, pos, &bw);
-        f_sync(&s_file);
+        f_write(&s_file, blk_hdr,     sizeof(blk_hdr),     &bw);
+        f_write(&s_file, s_tick_snap, sizeof(s_tick_snap),  &bw);
+        f_write(&s_file, s_ch1,       sizeof(s_ch1),        &bw);
+        f_write(&s_file, s_loff,      sizeof(s_loff),       &bw);
 
-        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
-        HAL_Delay(50);
-        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
-
+        static uint8_t s_block_count = 0;
+        if (++s_block_count >= 10) {
+            f_sync(&s_file);
+            s_block_count = 0;
+            /* 3 rapid blinks = "synced, safe to remove SD card" (~300 ms gap in stream) */
+            for (int i = 0; i < 6; i++) {
+                HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
+                HAL_Delay(50);
+            }
+        } else {
+            HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
+        }
         s_count = 0;
     }
 }
@@ -205,6 +202,7 @@ void ACQ_Process(void)
 void ACQ_Stop(void)
 {
     if (s_file_open) {
+        f_sync(&s_file); /* flush FatFS write-back cache and update directory entry */
         f_close(&s_file);
         s_file_open = 0;
     }
