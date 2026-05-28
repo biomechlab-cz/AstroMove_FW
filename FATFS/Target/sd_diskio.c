@@ -420,27 +420,24 @@ DRESULT SD_read(BYTE lun, BYTE *buff, DWORD sector, UINT count)
 }
 
 /* USER CODE BEGIN beforeWriteSection */
-/* Use polling-mode writes for FatFS layer.
- * IT-mode (HAL_SD_WriteBlocks_IT) fails at 480 kHz because hsd1.State may be
- * HAL_SD_STATE_BUSY when disk_write is called (previous DMA read completion
- * goes through two async steps: DMA TC → SDMMC DATAEND, with no synchronisation
- * point before disk_write is entered).
- * Polling (HAL_SD_WriteBlocks) is 100% CPU-driven — no callbacks, no DMA state
- * conflicts, no interrupt timing dependency.  Throughput is adequate for the
- * small number of FatFS meta-data writes (FAT + directory sectors) done during
- * pre-allocation.
- * WRITE_CPLT_MSG is posted manually so SD_write's osMessageQueueGet returns
- * immediately and does not block for 30 s.
- * SD_DMA_Write() in sd_dma.c uses DMA directly and is unaffected. */
-extern SD_HandleTypeDef hsd1;
-static uint8_t _bsp_sd_write_poll(uint32_t *p, uint32_t addr, uint32_t n)
+/* Route all FatFS disk_write calls through SD_DMA_Write() from sd_dma.c.
+ *
+ * Both HAL_SD_WriteBlocks (polling) and HAL_SD_WriteBlocks_IT previously failed
+ * at 480 kHz 4-bit because DMA channels were left in stale state after DMA reads.
+ * SD_DMA_Write applies the ST TECH040009 workaround (Abort + DeInit + Init both
+ * DMA channels) before every write, clearing that state.  This is confirmed to
+ * work.  WRITE_CPLT_MSG is posted after the synchronous SD_DMA_Write returns so
+ * SD_write's osMessageQueueGet unblocks immediately. */
+#include "sd_dma.h"
+static uint8_t _bsp_sd_write_dma(uint32_t *p, uint32_t addr, uint32_t n)
 {
-    if (HAL_SD_WriteBlocks(&hsd1, (uint8_t *)p, addr, n, 5000) != HAL_OK) return MSD_ERROR;
-    const uint16_t msg = WRITE_CPLT_MSG;
-    osMessageQueuePut(SDQueueID, (const void *)&msg, 0, 0);
+    if (SD_DMA_Write(addr, (const uint8_t *)p, n) != HAL_OK) return MSD_ERROR;
+    /* Do NOT post WRITE_CPLT_MSG here — HAL_SD_TxCpltCallback → BSP_SD_WriteCpltCallback
+     * already posts it from the DMA/SDMMC IRQ chain during wait_done, before
+     * SD_DMA_Write returns.  Posting twice fills the queue after 10 writes. */
     return MSD_OK;
 }
-#define BSP_SD_WriteBlocks_DMA _bsp_sd_write_poll
+#define BSP_SD_WriteBlocks_DMA _bsp_sd_write_dma
 /* USER CODE END beforeWriteSection */
 /**
   * @brief  Writes Sector(s)

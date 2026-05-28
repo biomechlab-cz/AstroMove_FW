@@ -73,6 +73,47 @@ The buffer is a **flat byte array** used as a ring/ping-pong buffer:
 - If write takes longer than the buffer can absorb (unlikely at 9.5 KB/s, SD writes typically 1-4 MB/s), the QSPI flash can act as overflow (see below).
 - File opened once at startup, appended continuously, closed on power-off or graceful stop.
 
+#### Two-task ping-pong architecture (FreeRTOS)
+
+```
+AcqTask  [high priority]           SDWriteTask  [normal priority]
+─────────────────────────          ─────────────────────────────
+reads ADS1292R + IMU               f_open("REC001.TXT", ...) on start
+snprintf into active buffer        f_write(drained buffer) per swap
+when buffer full → swap signal →   f_close on stop
+never touches SD                   never touches sensors
+```
+
+- Two equal-size buffers in RAM (ping + pong, 512-byte aligned)
+- AcqTask fills one; SDWriteTask drains the other — no contention
+- Swap signalled via FreeRTOS binary semaphore
+- Buffer size: 2 × 16 KB (= 1 cluster = 16 sectors) → fills every ~220 ms at 1 kSPS / 72 bytes per line; SD must write 16 KB in < 220 ms (easily met at 480 kHz 4-bit)
+- Multiple recordings: each session is one `f_open`…`f_close`; FatFS assigns clusters dynamically — no pre-allocation or fixed size needed
+- Filenames: `REC001.TXT` … `REC999.TXT`, incremented by scanning for first unused name
+
+#### disk_write fix (sd_diskio.c)
+
+Previous write path (`HAL_SD_WriteBlocks` and `HAL_SD_WriteBlocks_IT`) failed because DMA channels were in stale state after DMA reads. Fix: route `disk_write` through `SD_DMA_Write()` (sd_dma.c) which applies the **ST TECH040009 workaround** (Abort + DeInit + Init both DMA channels) before every write. This is proven to work. `disk_read` stays as polling (`HAL_SD_ReadBlocks`) — no DMA, no conflicts.
+
+```
+f_write → FatFS disk_write → SD_DMA_Write()   ← proven DMA path
+f_read  → FatFS disk_read  → HAL_SD_ReadBlocks()   ← polling, unchanged
+```
+
+#### Implementation checklist
+
+- [x] SDMMC1 4-bit 480 kHz DMA write + read (`sd_dma.c`)
+- [x] FAT32 directory entry struct correct (32 bytes, `lst_acc_date` field present)
+- [x] DMA_A.TXT / DMA_B.TXT visible on PC — raw DMA test passes
+- [x] **Fix `disk_write` in `sd_diskio.c` → call `SD_DMA_Write`** — done; two bugs fixed:
+  1. ST TECH040009: stale DMA channels after reads caused all HAL write variants to fail; fixed by routing `disk_write` through `SD_DMA_Write()` (Abort+DeInit+Init before every write)
+  2. Double-post: `BSP_SD_WriteCpltCallback` (DMA IRQ chain) already posts `WRITE_CPLT_MSG`; manual extra post was filling the queue (capacity 10) after repeated writes, causing stale-message race → `RES_ERROR`
+- [x] Verify `f_open` / `f_write` / `f_close` works — confirmed; `FATFS.TXT` written and read back correctly on PC
+- [ ] `AcqTask`: read ADS1292R + IMU, snprintf, fill active ping-pong buffer, signal on swap
+- [ ] `SDWriteTask`: f_open on start, f_write on buffer swap, f_close on stop
+- [ ] Recording start/stop trigger (GPIO button or USART command)
+- [ ] Filename generation (REC001..REC999 scan)
+
 ---
 
 ### QSPI flash cache (MX25R3235FM1xx1, 4 MB) — deferred
