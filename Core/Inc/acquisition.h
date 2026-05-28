@@ -3,21 +3,26 @@
 
 #include <stdint.h>
 
-/* Init: SD 4-bit 480 kHz, mount, open log_NNNN.bin.
+/* Call before osKernelInitialize. SD 4-bit 480 kHz, mount, open log_NNNN.bin.
    Returns 1 on success, 0 on failure. */
 uint8_t ACQ_Init(void);
 
-/* Call from main loop. Writes 1000-sample CSV block when buffer is full. */
-void ACQ_Process(void);
+/* Call after osKernelInitialize, before osKernelStart.
+   Creates DRDY semaphore and sample queue. */
+void ACQ_CreateRtosObjects(void);
 
-/* Called from EXTI0 ISR on ADS DRDY falling edge. */
+/* FreeRTOS task entry points — pass to osThreadNew. */
+void AcqTask(void *arg);     /* high priority: samples ADS on every DRDY */
+void SDWriteTask(void *arg); /* normal priority: accumulates and writes to SD */
+
+/* Called from EXTI0 ISR (priority 6) on ADS DRDY falling edge. */
 void ACQ_DRDY_Callback(void);
-
-/* Read ADS config registers and write them as a comment line to the open log file.
-   Call after ACQ_Init() and before ADS1292_StartContinuous(). */
-void ACQ_WriteDiagnostics(void);
 
 /* Flush and close log file. */
 void ACQ_Stop(void);
+
+/* Standalone SD DMA write test — inits card, writes test.txt, returns 1=pass 0=fail.
+   Run from a FreeRTOS task (scheduler must be running for DMA queue to work). */
+uint8_t ACQ_SD_WriteTest(void);
 
 #endif /* ACQUISITION_H */

@@ -52,7 +52,7 @@ void ADS1292_Init(SPI_HandleTypeDef *hspi)
     HAL_Delay(10);
 
     /* Register configuration — based on ProtoCentral V/Ohm reference setup */
-    ads_wreg(0x01, 0x03);  /* CONFIG1:  1 kSPS output data rate */
+    ads_wreg(0x01, 0x83);  /* CONFIG1:  1 kSPS, HR=1 (high-resolution mode) */
     HAL_Delay(10);
     ads_wreg(0x02, 0xA0);  /* CONFIG2:  internal 2.42 V reference, lead-off comp off, test signal off */
     HAL_Delay(10);
@@ -74,14 +74,15 @@ void ADS1292_Init(SPI_HandleTypeDef *hspi)
 
 uint8_t ADS1292_ReadID(void)
 {
-    uint8_t tx[2] = { 0x20, 0x00 };  /* RREG addr=0x00, count-1=0 */
-    uint8_t rx = 0;
+    /* TransmitReceive keeps cmd+response in one call — avoids stale FIFO byte
+     * left by a prior Transmit that HAL_SPI_Receive would incorrectly consume. */
+    uint8_t tx[3] = { 0x20, 0x00, 0xFF };
+    uint8_t rx[3] = { 0, 0, 0 };
     ADS_CS_LOW();
     HAL_Delay(1);
-    HAL_SPI_Transmit(_hspi, tx, 2, 10);
-    HAL_SPI_Receive(_hspi,  &rx, 1, 10);
+    HAL_SPI_TransmitReceive(_hspi, tx, rx, 3, 20);
     ADS_CS_HIGH();
-    return rx;
+    return rx[2];
 }
 
 void ADS1292_StartContinuous(void)
@@ -103,15 +104,14 @@ void ADS1292_ExitRDATAC(void)
 
 uint8_t ADS1292_ReadReg(uint8_t reg)
 {
-    uint8_t tx[2] = { 0x20 | (reg & 0x1F), 0x00 };
-    uint8_t rx = 0;
+    uint8_t tx[3] = { 0x20 | (reg & 0x1F), 0x00, 0xFF };
+    uint8_t rx[3] = { 0, 0, 0 };
     ADS_CS_LOW();
     HAL_Delay(1);
-    HAL_SPI_Transmit(_hspi, tx, 2, 10);
-    HAL_SPI_Receive(_hspi, &rx, 1, 10);
+    HAL_SPI_TransmitReceive(_hspi, tx, rx, 3, 20);
     ADS_CS_HIGH();
     HAL_Delay(2);
-    return rx;
+    return rx[2];
 }
 
 void ADS1292_ReadRDATA(uint8_t buf[9])

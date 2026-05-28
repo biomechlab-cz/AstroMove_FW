@@ -3,11 +3,13 @@
 #include "i2c_sensors.h"
 #include "main.h"
 #include "fatfs.h"
+#include "cmsis_os.h"
 #include <stdio.h>
 #include <string.h>
 
 /* ---- SD init (validated 4-bit 480 kHz) ---- */
 extern SD_HandleTypeDef hsd1;
+extern SPI_HandleTypeDef hspi1;
 
 static void sdmmc_gpio_very_high(void)
 {
@@ -40,7 +42,7 @@ static uint8_t sd_init_4bit(void)
     sdmmc_gpio_very_high();
     if (!sd_wait_transfer(1000)) return 0;
     if (HAL_SD_ConfigWideBusOperation(&hsd1, SDMMC_BUS_WIDE_4B) != HAL_OK) return 0;
-    MODIFY_REG(SDMMC1->CLKCR, SDMMC_CLKCR_CLKDIV, 50U);
+    MODIFY_REG(SDMMC1->CLKCR, SDMMC_CLKCR_CLKDIV, 100U);
     HAL_Delay(20);
     return sd_wait_transfer(500);
 }
@@ -51,30 +53,35 @@ static uint8_t sd_init_4bit(void)
  * File header  — 32 bytes, written once at open:
  *   [0..3]   magic "AMS1"
  *   [4]      ADS ID register
- *   [5..13]  ADS registers: cfg1,cfg2,loff,ch1set,ch2set,rldsens,loffsens,resp1,resp2 (9 bytes)
+ *   [5..13]  ADS registers: cfg1,cfg2,loff,ch1set,ch2set,rldsens,loffsens,resp1,resp2
  *   [14..19] RTC start time: sec,min,hr,date,mon,yr (BCD, from RV-3028-C7)
  *   [20..31] reserved 0x00
  *
  * Data block   — 5048 bytes, appended once per 1000-sample batch:
- *   [0..5]     RTC time at block flush: sec,min,hr,date,mon,yr (BCD)
- *   [6..7]     reserved 0x00
- *   [8..47]    uint32_t tick_snap[10]  — HAL_GetTick() at each 100-sample boundary (LE)
- *   [48..4047] int32_t  ch1[1000]     — 24-bit ADC counts sign-extended to 32 bits (LE)
- *   [4048..5047] uint8_t loff[1000]   — raw ADS status byte 0 (lead-off flags in bits 6:4)
+ *   [0..5]       RTC time at block flush: sec,min,hr,date,mon,yr (BCD)
+ *   [6..7]       reserved 0x00
+ *   [8..47]      uint32_t tick_snap[10]  — HAL_GetTick() at 100-sample boundaries (LE)
+ *   [48..4047]   int32_t  ch1[1000]     — 24-bit ADC counts sign-extended to 32 bits (LE)
+ *   [4048..5047] uint8_t  loff[1000]    — raw ADS status byte 0
  *
- * f_sync every 10 blocks (~10 s) so data survives power loss without ACQ_Stop.
+ * f_sync every 10 blocks (~10 s); 3-blink LED signals safe-to-remove.
  *
  * Python:  python plot_ecg.py log_NNNN.bin
  * ==================================================================== */
 #define ADS_BUF_LEN    1000
-#define BLOCK_HDR_SIZE 32   /* file header, written once */
-#define BLOCK_SIZE     5048 /* per-batch data block (8-byte RTC header + 5040 data) */
+#define BLOCK_HDR_SIZE 32
+#define BLOCK_SIZE     5048
 
-/* ---- sample buffers ---- */
-static int32_t  s_ch1[ADS_BUF_LEN];
-static uint8_t  s_loff[ADS_BUF_LEN];
-static uint32_t s_tick_snap[ADS_BUF_LEN / 100]; /* HAL_GetTick() at 100-sample boundaries */
-static uint16_t s_count = 0;
+/* ---- RTOS objects ---- */
+static osSemaphoreId_t    s_drdy_sem;
+static osMessageQueueId_t s_queue;
+
+typedef struct {
+    int32_t  ch1;
+    uint32_t tick;
+    uint8_t  loff;
+    uint8_t  _pad[3];
+} Sample_t;
 
 /* ---- log file ---- */
 static FATFS   s_fs;
@@ -91,15 +98,14 @@ static void find_log_name(char *buf, size_t sz)
 }
 
 /* ====================================================================
- * ISR path
+ * ISR path  (EXTI0, priority 6 — within FreeRTOS API window)
  * ==================================================================== */
 volatile uint32_t g_isr_count = 0;
-volatile uint8_t  g_drdy_flag = 0;
 
 void ACQ_DRDY_Callback(void)
 {
     g_isr_count++;
-    g_drdy_flag = 1;
+    osSemaphoreRelease(s_drdy_sem);
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
@@ -124,6 +130,12 @@ uint8_t ACQ_Init(void)
     return 1;
 }
 
+void ACQ_CreateRtosObjects(void)
+{
+    s_drdy_sem = osSemaphoreNew(1, 0, NULL);            /* binary, initially 0 */
+    s_queue    = osMessageQueueNew(200, sizeof(Sample_t), NULL);
+}
+
 void ACQ_WriteDiagnostics(void)
 {
     if (!s_file_open) return;
@@ -141,70 +153,168 @@ void ACQ_WriteDiagnostics(void)
     hdr[12] = ADS1292_ReadReg(0x09); /* RESP1 */
     hdr[13] = ADS1292_ReadReg(0x0A); /* RESP2 */
     RTC_Time_t t = {0};
-    RV3028_ReadTime(&t); /* BCD; stays 0x00 on I2C failure */
+    RV3028_ReadTime(&t);
     hdr[14] = t.sec; hdr[15] = t.min; hdr[16] = t.hr;
     hdr[17] = t.date; hdr[18] = t.mon; hdr[19] = t.yr;
-    /* [20..31] remain 0x00 */
 
     UINT bw;
     f_write(&s_file, hdr, sizeof(hdr), &bw);
-    f_sync(&s_file); /* sync once after header */
+    f_sync(&s_file);
 }
 
-void ACQ_Process(void)
+/* ====================================================================
+ * AcqTask — high priority
+ * Handles startup sequence, then samples on every DRDY semaphore.
+ * ==================================================================== */
+void AcqTask(void *arg)
 {
-    if (s_count >= ADS_BUF_LEN) return;
-    if (!g_drdy_flag) return;
-    g_drdy_flag = 0;
-
-    uint8_t raw[9] = {0};
-    ADS1292_ReadRaw(raw);
-
-    s_ch1[s_count]  = ((int32_t)((uint32_t)raw[3] << 24 |
-                                  (uint32_t)raw[4] << 16 |
-                                  (uint32_t)raw[5] << 8)) >> 8;
-    s_loff[s_count] = raw[0];
-    if (s_count % 100 == 0)
-        s_tick_snap[s_count / 100] = HAL_GetTick();
-    s_count++;
-
-    if (s_count >= ADS_BUF_LEN) {
-        /* 8-byte RTC block header, then three raw array writes.
-           Total: 8 + 40 + 4000 + 1000 = 5048 bytes (~13 ms at 395 KB/s). */
-        uint8_t blk_hdr[8] = {0};
-        RTC_Time_t t = {0};
-        RV3028_ReadTime(&t);
-        blk_hdr[0] = t.sec; blk_hdr[1] = t.min; blk_hdr[2] = t.hr;
-        blk_hdr[3] = t.date; blk_hdr[4] = t.mon; blk_hdr[5] = t.yr;
-
-        UINT bw;
-        f_write(&s_file, blk_hdr,     sizeof(blk_hdr),     &bw);
-        f_write(&s_file, s_tick_snap, sizeof(s_tick_snap),  &bw);
-        f_write(&s_file, s_ch1,       sizeof(s_ch1),        &bw);
-        f_write(&s_file, s_loff,      sizeof(s_loff),       &bw);
-
-        static uint8_t s_block_count = 0;
-        if (++s_block_count >= 10) {
-            f_sync(&s_file);
-            s_block_count = 0;
-            /* 3 rapid blinks = "synced, safe to remove SD card" (~300 ms gap in stream) */
-            for (int i = 0; i < 6; i++) {
-                HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
-                HAL_Delay(50);
-            }
-        } else {
+    /* SD init runs here — scheduler is fully active, so FatFS mutex/queue creation works */
+    if (!ACQ_Init()) {
+        for (;;) {
             HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
+            osDelay(100);
         }
-        s_count = 0;
+    }
+
+    /* Init ADS here (not in main.c) — keeps SPI init and reads in the same context */
+    ADS1292_Init(&hspi1);
+
+    /* Diagnostics header requires ADS in SDATAC (already set by ADS1292_Init above) */
+    ACQ_WriteDiagnostics();
+
+    /* 1-second startup flash using osDelay so SDWriteTask can run if needed */
+    for (int i = 0; i < 10; i++) {
+        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
+        osDelay(100);
+    }
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+
+    /* Enable DRDY interrupt now that semaphore is ready, then start streaming */
+    HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+    ADS1292_StartContinuous();
+
+    for (;;) {
+        osSemaphoreAcquire(s_drdy_sem, osWaitForever);
+
+        uint8_t raw[9] = {0};
+        ADS1292_ReadRaw(raw);
+
+        Sample_t s;
+        s.ch1  = ((int32_t)((uint32_t)raw[3] << 24 |
+                             (uint32_t)raw[4] << 16 |
+                             (uint32_t)raw[5] << 8)) >> 8;
+        s.loff = raw[0];
+        s.tick = HAL_GetTick();
+        osMessageQueuePut(s_queue, &s, 0, 0); /* non-blocking; queue has 100-sample headroom */
+    }
+}
+
+/* ====================================================================
+ * SDWriteTask — normal priority
+ * Drains the queue, accumulates 1000-sample blocks, writes to SD.
+ * AcqTask keeps sampling while f_write runs here.
+ * ==================================================================== */
+void SDWriteTask(void *arg)
+{
+    static int32_t  ch1[ADS_BUF_LEN];
+    static uint8_t  loff_buf[ADS_BUF_LEN];
+    static uint32_t tick_snap[ADS_BUF_LEN / 100];
+    uint16_t count       = 0;
+    uint8_t  block_count = 0;
+
+    for (;;) {
+        Sample_t s;
+        osMessageQueueGet(s_queue, &s, NULL, osWaitForever);
+
+        ch1[count]      = s.ch1;
+        loff_buf[count] = s.loff;
+        if (count % 100 == 0)
+            tick_snap[count / 100] = s.tick;
+        count++;
+
+        if (count >= ADS_BUF_LEN) {
+            uint8_t blk_hdr[8] = {0};
+            RTC_Time_t t = {0};
+            RV3028_ReadTime(&t);
+            blk_hdr[0] = t.sec; blk_hdr[1] = t.min; blk_hdr[2] = t.hr;
+            blk_hdr[3] = t.date; blk_hdr[4] = t.mon; blk_hdr[5] = t.yr;
+
+            UINT bw;
+            FRESULT fr;
+            fr  = f_write(&s_file, blk_hdr,   sizeof(blk_hdr),   &bw);
+            fr |= f_write(&s_file, tick_snap,  sizeof(tick_snap),  &bw);
+            fr |= f_write(&s_file, ch1,        sizeof(ch1),        &bw);
+            fr |= f_write(&s_file, loff_buf,   sizeof(loff_buf),   &bw);
+            if (fr != FR_OK) {
+                /* SD write failed — rapid blink to signal error */
+                for (;;) {
+                    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
+                    osDelay(50);
+                }
+            }
+
+            if (++block_count >= 10) {
+                f_sync(&s_file);
+                block_count = 0;
+                /* 3 rapid blinks = "synced, safe to remove SD card"
+                   osDelay yields CPU — AcqTask keeps sampling during blink */
+                for (int i = 0; i < 6; i++) {
+                    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
+                    osDelay(50);
+                }
+            } else {
+                HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
+            }
+            count = 0;
+        }
     }
 }
 
 void ACQ_Stop(void)
 {
     if (s_file_open) {
-        f_sync(&s_file); /* flush FatFS write-back cache and update directory entry */
+        f_sync(&s_file);
         f_close(&s_file);
         s_file_open = 0;
     }
     f_mount(NULL, SDPath, 0);
+}
+
+/* ====================================================================
+ * ACQ_SD_WriteTest
+ * Standalone DMA write test — run from a FreeRTOS task (scheduler must
+ * be running so the sd_diskio DMA completion queue works).
+ * Writes 10 lines of ASCII text to test.txt on the SD card.
+ * Returns 1 on full success, 0 on any failure.
+ * ==================================================================== */
+/* ACQ_SD_WriteTest — full DMA+FatFS test.
+ * Returns 0 = pass, or error stage (1-6) blinkable in StartDefaultTask:
+ *   1 = sd_init_4bit failed
+ *   2 = f_mount failed
+ *   3 = f_open failed
+ *   4 = f_write failed (FR_DISK_ERR means DMA write broken)
+ *   5 = (reserved)
+ *   6 = (reserved) */
+uint8_t ACQ_SD_WriteTest(void)
+{
+    if (!sd_init_4bit()) return 1;
+    if (f_mount(&s_fs, SDPath, 1) != FR_OK) return 2;
+
+    static FIL test_f;
+    UINT bw;
+    FRESULT fr;
+
+    fr = f_open(&test_f, "test.txt", FA_WRITE | FA_CREATE_ALWAYS);
+    if (fr != FR_OK) { f_mount(NULL, SDPath, 0); return 3; }
+
+    static const char line[] = "AstroMowe SD DMA write test OK\r\n";
+    for (int i = 0; i < 10; i++) {
+        fr = f_write(&test_f, line, sizeof(line) - 1, &bw);
+        if (fr != FR_OK || bw != sizeof(line) - 1) { f_close(&test_f); f_mount(NULL, SDPath, 0); return 4; }
+    }
+
+    f_sync(&test_f);
+    f_close(&test_f);
+    f_mount(NULL, SDPath, 0);
+    return 0;
 }
