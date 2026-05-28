@@ -4,6 +4,34 @@
 #include "stm32l4xx_hal.h"
 #include <stdint.h>
 
+
+// Register Read Commands
+#define RREG 0x20; // Read n nnnn registers starting at address r rrrr
+// first byte 001r rrrr (2xh)(2) - second byte 000n nnnn(2)
+#define WREG 0x40; // Write n nnnn registers starting at address r rrrr
+// first byte 010r rrrr (2xh)(2) - second byte 000n nnnn(2)
+
+#define START 0x08  // Start/restart (synchronize) conversions
+#define STOP 0x0A   // Stop conversion
+#define RDATAC 0x10 // Enable Read Data Continuous mode.
+
+// This mode is the default mode at power-up.
+#define SDATAC 0x11 // Stop Read Data Continuously mode
+#define RDATA 0x12  // Read data by command; supports multiple read back.
+
+// register address
+#define ADS1292_REG_ID 0x00
+#define ADS1292_REG_CONFIG1 0x01
+#define ADS1292_REG_CONFIG2 0x02
+#define ADS1292_REG_LOFF 0x03
+#define ADS1292_REG_CH1SET 0x04
+#define ADS1292_REG_CH2SET 0x05
+#define ADS1292_REG_RLDSENS 0x06
+#define ADS1292_REG_LOFFSENS 0x07
+#define ADS1292_REG_LOFFSTAT 0x08
+#define ADS1292_REG_RESP1 0x09
+#define ADS1292_REG_RESP2 0x0A
+
 typedef struct {
     uint32_t status;  /* 24-bit status word — header bits [23:20] must be 0xC */
     int32_t  ch1;     /* 24-bit signed — raw ADC counts */

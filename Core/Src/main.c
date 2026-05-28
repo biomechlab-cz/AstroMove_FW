@@ -173,13 +173,6 @@ int main(void)
     /* USER CODE BEGIN 3 */
     ACQ_Process();
 
-    /* 1 Hz heartbeat — always visible so we know the main loop is alive */
-    static uint32_t s_led_tick = 0;
-    if (HAL_GetTick() - s_led_tick >= 1000) {
-        s_led_tick = HAL_GetTick();
-        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
-    }
-
   }
   /* USER CODE END 3 */
 }

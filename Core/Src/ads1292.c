@@ -49,27 +49,32 @@ void ADS1292_Init(SPI_HandleTypeDef *hspi)
     ads_cmd(0x06);  /* RESET */
     HAL_Delay(100);
     ads_cmd(0x11);  /* SDATAC — exit continuous mode so registers are accessible */
+    HAL_Delay(300);
+
+    /* Register configuration — based on ProtoCentral V/Ohm reference setup */
+    ads_wreg(ADS1292_REG_CONFIG1, 0x03);  /* CONFIG1:  1 kSPS output data rate */
+    HAL_Delay(10);
+    ads_wreg(ADS1292_REG_CONFIG2, 0b10100000);  /* CONFIG2:  internal 2.42 V reference, lead-off comp off, test signal off */
+    HAL_Delay(10);
+    ads_wreg(ADS1292_REG_LOFF, 0b00010000);  /* LOFF:     DC lead-off detection, threshold 5% */
+    HAL_Delay(10);
+    ads_wreg(ADS1292_REG_CH1SET, 0b01000000);  /* CH1SET:   PGA gain 4, normal electrode input */
+    HAL_Delay(10);
+    ads_wreg(ADS1292_REG_CH2SET, 0b01100000);  /* CH2SET:   PGA gain 8, normal electrode input */
+    HAL_Delay(10);
+    ads_wreg(ADS1292_REG_RLDSENS, 0x00);  /* RLDSENS:  RLD channel routing off */
+    HAL_Delay(10);
+    ads_wreg(ADS1292_REG_LOFFSENS, 0x0F);  /* LOFFSENS: lead-off detection on IN1P/IN1N/IN2P/IN2N */
+    HAL_Delay(10);
+    ads_wreg(ADS1292_REG_RESP1, 0b11110010);  /* RESP1:    demodulator+modulator on, RLDREF internal, 32 kHz clock */
+    HAL_Delay(10);
+    ads_wreg(ADS1292_REG_RESP2, 0b00000011);  /* RESP2:    clock output enabled, RLDREF internally generated */
     HAL_Delay(10);
 
     /* Register configuration — based on ProtoCentral V/Ohm reference setup */
-    ads_wreg(0x01, 0x03);  /* CONFIG1:  1 kSPS output data rate */
+    ads_wreg(ADS1292_REG_CONFIG1, 0x03);  /* CONFIG1:  1 kSPS output data rate */
     HAL_Delay(10);
-    ads_wreg(0x02, 0xA0);  /* CONFIG2:  internal 2.42 V reference, lead-off comp off, test signal off */
-    HAL_Delay(10);
-    ads_wreg(0x03, 0x10);  /* LOFF:     DC lead-off detection, threshold 5% */
-    HAL_Delay(10);
-    ads_wreg(0x04, 0x40);  /* CH1SET:   PGA gain 4, normal electrode input */
-    HAL_Delay(10);
-    ads_wreg(0x05, 0x60);  /* CH2SET:   PGA gain 8, normal electrode input */
-    HAL_Delay(10);
-    ads_wreg(0x06, 0x00);  /* RLDSENS:  RLD channel routing off */
-    HAL_Delay(10);
-    ads_wreg(0x07, 0x0F);  /* LOFFSENS: lead-off detection on IN1P/IN1N/IN2P/IN2N */
-    HAL_Delay(10);
-    ads_wreg(0x09, 0xF2);  /* RESP1:    demodulator+modulator on, RLDREF internal, 32 kHz clock */
-    HAL_Delay(10);
-    ads_wreg(0x0A, 0x03);  /* RESP2:    clock output enabled, RLDREF internally generated */
-    HAL_Delay(10);
+
 }
 
 uint8_t ADS1292_ReadID(void)

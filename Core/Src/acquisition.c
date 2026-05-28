@@ -46,6 +46,43 @@ static uint8_t sd_init_4bit(void)
 }
 
 /* ====================================================================
+ * Timing calibration
+ * ==================================================================== */
+void ACQ_TimingCalibration(void)
+{
+    RTC_Time_t t0 = {0}, t1 = {0};
+
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+
+    RV3028_ReadTime(&t0);
+    uint32_t tick0 = HAL_GetTick();
+
+    HAL_Delay(10000);
+
+    RV3028_ReadTime(&t1);
+    uint32_t tick1 = HAL_GetTick();
+
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+
+    /* BCD to decimal */
+    uint32_t s0 = (t0.hr  >> 4) * 36000 + (t0.hr  & 0x0F) * 3600
+                + (t0.min >> 4) *   600 + (t0.min & 0x0F) *   60
+                + (t0.sec >> 4) *    10 + (t0.sec & 0x0F);
+    uint32_t s1 = (t1.hr  >> 4) * 36000 + (t1.hr  & 0x0F) * 3600
+                + (t1.min >> 4) *   600 + (t1.min & 0x0F) *   60
+                + (t1.sec >> 4) *    10 + (t1.sec & 0x0F);
+
+    uint32_t delta_tick = tick1 - tick0;           /* ms, should be ~10000 */
+    int32_t  delta_rtc  = (int32_t)(s1 - s0);     /* seconds per RTC */
+
+    char buf[128];
+    int len = snprintf(buf, sizeof(buf),
+        "TIMING: tick=%lu ms  RTC=%ld s  diff=%ld ms\r\n",
+        delta_tick, delta_rtc, (long)delta_tick - delta_rtc * 1000);
+    HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)len, 100);
+}
+
+/* ====================================================================
  * Binary file format
  *
  * File header  — 32 bytes, written once at open:
@@ -187,14 +224,8 @@ void ACQ_Process(void)
         if (++s_block_count >= 10) {
             f_sync(&s_file);
             s_block_count = 0;
-            /* 3 rapid blinks = "synced, safe to remove SD card" (~300 ms gap in stream) */
-            for (int i = 0; i < 6; i++) {
-                HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
-                HAL_Delay(50);
-            }
-        } else {
-            HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
         }
+        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
         s_count = 0;
     }
 }

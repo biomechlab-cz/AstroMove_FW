@@ -20,4 +20,8 @@ void ACQ_WriteDiagnostics(void);
 /* Flush and close log file. */
 void ACQ_Stop(void);
 
+/* Timing calibration: LED on, wait 10 s via HAL_GetTick, read RTC before/after,
+   print result to USART1. Call after I2C_Sensors_Init(). */
+void ACQ_TimingCalibration(void);
+
 #endif /* ACQUISITION_H */

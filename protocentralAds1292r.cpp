@@ -16,7 +16,6 @@
 //   Downloaded from Processing IDE Sketch->Import Library->Add Library->G4P Install
 //
 /////////////////////////////////////////////////////////////////////////////////////////
-#include "Arduino.h"
 #include "protocentralAds1292r.h"
 #include <SPI.h>
 
@@ -105,68 +104,6 @@ void ads1292r::ads1292Init(const int chipSelect, const int pwdnPin, const int st
   delay(50);
   ads1292StopReadDataContinuous(chipSelect); // SDATAC command
   delay(300);
-//   ads1292RegWrite(ADS1292_REG_CONFIG1, SPS_1000, chipSelect);
-//   delay(10);
-//   // bit7 must be 1, bit5 reference buffer
-//   ads1292RegWrite(ADS1292_REG_CONFIG2,  0b10100000, chipSelect); // Lead-off comp off, test signal disabled
-//   delay(10);
-//   ads1292RegWrite(ADS1292_REG_LOFF,     0b00010000,       chipSelect); // LOFF OFF
-//   delay(10);
-// //  ads1292RegWrite(ADS1292_REG_CH1SET,   0b00000000, chipSelect); // PGA 6x
-//   ads1292RegWrite(ADS1292_REG_CH1SET,   0b01100000, chipSelect); // PGA 8x
-//   delay(10);
-// //  ads1292RegWrite(ADS1292_REG_CH2SET,   0b00000000, chipSelect); // PGA 6x
-//   ads1292RegWrite(ADS1292_REG_CH2SET,   0b01100000, chipSelect); // PGA 8x
-//   delay(10);
-  
-//   ads1292RegWrite(ADS1292_REG_RLDSENS,  0x00,       chipSelect);
-//   delay(10);
-//   ads1292RegWrite(ADS1292_REG_LOFFSENS, 0x00,       chipSelect);
-//   delay(10);
-//   // ads1292RegWrite(ADS1292_REG_LOFFSTAT, 0x00,       chipSelect); // LOFF settings: all disabled
-//   // delay(10);
-//   ads1292RegWrite(ADS1292_REG_RESP1,    0b00000010, chipSelect); // Respiration: MOD/DEMOD turned off
-//   delay(10);
-//   ads1292RegWrite(ADS1292_REG_RESP2,    0b00000001, chipSelect); // Respiration: Calib OFF, respiration freq defaults
-//   delay(10);
-
-
-//////////////////////////////////////////////////////////////////////////////////
-////////////////////////// EEG - very strong candidate ///////////////////////////
-//////////////////////////////////////////////////////////////////////////////////
-//   ads1292RegWrite(ADS1292_REG_CONFIG1, SPS_1000, chipSelect);
-//   delay(10);
-//   // bit7 must be 1, bit5 reference buffer
-//   ads1292RegWrite(ADS1292_REG_CONFIG2,  0b10100000, chipSelect); // Lead-off comp off, test signal disabled
-//   delay(10);
-//   ads1292RegWrite(ADS1292_REG_LOFF,     0b00010000,       chipSelect); // LOFF OFF
-//   delay(10);
-// //  ads1292RegWrite(ADS1292_REG_CH1SET,   0b00000000, chipSelect); // PGA 6x
-//   ads1292RegWrite(ADS1292_REG_CH1SET,   0b01100000, chipSelect); // PGA 8x
-//   delay(10);
-// //  ads1292RegWrite(ADS1292_REG_CH2SET,   0b00000000, chipSelect); // PGA 6x
-//   ads1292RegWrite(ADS1292_REG_CH2SET,   0b01100000, chipSelect); // PGA 8x
-//   delay(10);
-  
-//   ads1292RegWrite(ADS1292_REG_RLDSENS,  0b00100011,       chipSelect);
-//   delay(10);
-//   ads1292RegWrite(ADS1292_REG_LOFFSENS, 0x0F,       chipSelect);
-//   delay(10);
-//   // ads1292RegWrite(ADS1292_REG_LOFFSTAT, 0x00,       chipSelect); // LOFF settings: all disabled
-//   // delay(10);
-//   ads1292RegWrite(ADS1292_REG_RESP1,    0b00000010, chipSelect); // Respiration: MOD/DEMOD turned off
-//   delay(10);
-//   ads1292RegWrite(ADS1292_REG_RESP2,    0b00000001, chipSelect); // Respiration: Calib OFF, respiration freq defaults
-//   delay(10);
-
-//////////////////////////////////////////////////////////////////////////////////
-////////////////////////// EEG - very strong candidate ///////////////////////////
-//////////////////////////////////////////////////////////////////////////////////
-
-
-//////////////////////////////////////////////////////////////////////////////////
-/////////////////////// V/Ohm - very strong candidate 2 //////////////////////////
-//////////////////////////////////////////////////////////////////////////////////
   ads1292RegWrite(ADS1292_REG_CONFIG1, SPS_1000, chipSelect);
   delay(10);
   // bit7 must be 1, bit5 reference buffer
