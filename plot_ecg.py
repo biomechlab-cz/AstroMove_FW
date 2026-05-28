@@ -59,12 +59,12 @@ def parse_bin(path):
     offset = FILE_HEADER
     block_idx = 0
     while offset + BLOCK_SIZE <= len(data):
-        rtc  = struct.unpack_from('6B', data, offset)
+        rtc  = struct.unpack_from('8B', data, offset)
         tick = struct.unpack_from('<10I', data, offset + BLK_HDR_BYTES)
         ch1  = struct.unpack_from('<1000i', data, offset + BLK_HDR_BYTES + TICK_BYTES)
         loff = struct.unpack_from('1000B',  data, offset + BLK_HDR_BYTES + TICK_BYTES + CH1_BYTES)
 
-        # per-sample timestamp: boundary tick + intra-group ms offset
+        # per-sample timestamp: tick boundary + intra-group ms offset (1 ms per sample assumed)
         ts = [tick[i // 100] + (i % 100) for i in range(SAMPLES_PER_BLOCK)]
 
         all_ts.extend(ts)
@@ -112,13 +112,22 @@ def plot_files(paths):
               f"RESP1={regs['resp1']:02X}")
         for i, rtc in enumerate(all_rtc):
             rs, rm, rh = bcd(rtc[0]), bcd(rtc[1]), bcd(rtc[2])
-            print(f"  block {i}: {rh:02d}:{rm:02d}:{rs:02d}")
+            fsync_ms  = rtc[6]
+            fwrite_ms = rtc[7]
+            extras = ""
+            if fsync_ms:  extras += f"  fsync={fsync_ms}ms"
+            if fwrite_ms: extras += f"  fwrite={fwrite_ms}ms"
+            print(f"  block {i}: {rh:02d}:{rm:02d}:{rs:02d}{extras}")
         check_timing(ts, path.name)
 
         t_sec = (ts - ts[0]) / 1000.0
         signal_uv = ch1 * LSB_UV
 
         ax.plot(t_sec, signal_uv, lw=0.5, color='steelblue')
+
+        # Vertical lines at every 1-second tick boundary
+        for s in range(0, int(t_sec[-1]) + 2):
+            ax.axvline(x=s, color='red', alpha=0.25, linewidth=0.8, linestyle='--')
 
         ax.set_title(f"{path.name}  |  {len(ts)} samples  |  "
                      f"{n_blocks} blocks  |  span {ts[-1]-ts[0]} ms",

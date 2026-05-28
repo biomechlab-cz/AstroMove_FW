@@ -48,39 +48,38 @@ static uint8_t sd_init_4bit(void)
 /* ====================================================================
  * Timing calibration
  * ==================================================================== */
-void ACQ_TimingCalibration(void)
-{
-    RTC_Time_t t0 = {0}, t1 = {0};
+// void ACQ_TimingCalibration(void)
+// {
+//     RTC_Time_t t0 = {0}, t1 = {0};
 
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+//     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
 
-    RV3028_ReadTime(&t0);
-    uint32_t tick0 = HAL_GetTick();
+//     RV3028_ReadTime(&t0);
+//     uint32_t tick0 = HAL_GetTick();
 
-    HAL_Delay(10000);
+//     HAL_Delay(10000);
 
-    RV3028_ReadTime(&t1);
-    uint32_t tick1 = HAL_GetTick();
+//     RV3028_ReadTime(&t1);
+//     uint32_t tick1 = HAL_GetTick();
 
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+//     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
 
-    /* BCD to decimal */
-    uint32_t s0 = (t0.hr  >> 4) * 36000 + (t0.hr  & 0x0F) * 3600
-                + (t0.min >> 4) *   600 + (t0.min & 0x0F) *   60
-                + (t0.sec >> 4) *    10 + (t0.sec & 0x0F);
-    uint32_t s1 = (t1.hr  >> 4) * 36000 + (t1.hr  & 0x0F) * 3600
-                + (t1.min >> 4) *   600 + (t1.min & 0x0F) *   60
-                + (t1.sec >> 4) *    10 + (t1.sec & 0x0F);
+//     /* BCD to decimal */
+//     uint32_t s0 = (t0.hr  >> 4) * 36000 + (t0.hr  & 0x0F) * 3600
+//                 + (t0.min >> 4) *   600 + (t0.min & 0x0F) *   60
+//                 + (t0.sec >> 4) *    10 + (t0.sec & 0x0F);
+//     uint32_t s1 = (t1.hr  >> 4) * 36000 + (t1.hr  & 0x0F) * 3600
+//                 + (t1.min >> 4) *   600 + (t1.min & 0x0F) *   60
+//                 + (t1.sec >> 4) *    10 + (t1.sec & 0x0F);
 
-    uint32_t delta_tick = tick1 - tick0;           /* ms, should be ~10000 */
-    int32_t  delta_rtc  = (int32_t)(s1 - s0);     /* seconds per RTC */
+//     uint32_t delta_tick = tick1 - tick0;           /* ms, should be ~10000 */
+//     int32_t  delta_rtc  = (int32_t)(s1 - s0);     /* seconds per RTC */
 
-    char buf[128];
-    int len = snprintf(buf, sizeof(buf),
-        "TIMING: tick=%lu ms  RTC=%ld s  diff=%ld ms\r\n",
-        delta_tick, delta_rtc, (long)delta_tick - delta_rtc * 1000);
-    HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)len, 100);
-}
+//     char buf[128];
+//     int len = snprintf(buf, sizeof(buf),
+//         "TIMING: tick=%lu ms  RTC=%ld s  diff=%ld ms\r\n",
+//         delta_tick, delta_rtc, (long)delta_tick - delta_rtc * 1000);
+// }
 
 /* ====================================================================
  * Binary file format
@@ -94,7 +93,8 @@ void ACQ_TimingCalibration(void)
  *
  * Data block   — 5048 bytes, appended once per 1000-sample batch:
  *   [0..5]     RTC time at block flush: sec,min,hr,date,mon,yr (BCD)
- *   [6..7]     reserved 0x00
+ *   [6]        f_sync duration ms from previous sync (0 if no sync since last block)
+ *   [7]        f_write duration ms from previous block (4× f_write combined, capped at 255)
  *   [8..47]    uint32_t tick_snap[10]  — HAL_GetTick() at each 100-sample boundary (LE)
  *   [48..4047] int32_t  ch1[1000]     — 24-bit ADC counts sign-extended to 32 bits (LE)
  *   [4048..5047] uint8_t loff[1000]   — raw ADS status byte 0 (lead-off flags in bits 6:4)
@@ -117,6 +117,8 @@ static uint16_t s_count = 0;
 static FATFS   s_fs;
 static FIL     s_file;
 static uint8_t s_file_open = 0;
+static uint32_t s_fsync_last_ms  = 0;  /* duration of most recent f_sync call, ms */
+static uint32_t s_fwrite_last_ms = 0;  /* duration of most recent 4× f_write calls, ms */
 
 static void find_log_name(char *buf, size_t sz)
 {
@@ -190,7 +192,6 @@ void ACQ_WriteDiagnostics(void)
 
 void ACQ_Process(void)
 {
-    if (s_count >= ADS_BUF_LEN) return;
     if (!g_drdy_flag) return;
     g_drdy_flag = 0;
 
@@ -213,16 +214,24 @@ void ACQ_Process(void)
         RV3028_ReadTime(&t);
         blk_hdr[0] = t.sec; blk_hdr[1] = t.min; blk_hdr[2] = t.hr;
         blk_hdr[3] = t.date; blk_hdr[4] = t.mon; blk_hdr[5] = t.yr;
+        blk_hdr[6] = (uint8_t)(s_fsync_last_ms  > 255 ? 255 : s_fsync_last_ms);  /* prev f_sync ms */
+        blk_hdr[7] = (uint8_t)(s_fwrite_last_ms > 255 ? 255 : s_fwrite_last_ms); /* prev f_write ms */
+        s_fsync_last_ms  = 0;
+        s_fwrite_last_ms = 0;
 
         UINT bw;
+        uint32_t tw0 = HAL_GetTick();
         f_write(&s_file, blk_hdr,     sizeof(blk_hdr),     &bw);
         f_write(&s_file, s_tick_snap, sizeof(s_tick_snap),  &bw);
         f_write(&s_file, s_ch1,       sizeof(s_ch1),        &bw);
         f_write(&s_file, s_loff,      sizeof(s_loff),       &bw);
+        s_fwrite_last_ms = HAL_GetTick() - tw0;
 
         static uint8_t s_block_count = 0;
         if (++s_block_count >= 10) {
+            uint32_t ts0 = HAL_GetTick();
             f_sync(&s_file);
+            s_fsync_last_ms = HAL_GetTick() - ts0;
             s_block_count = 0;
         }
         HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
