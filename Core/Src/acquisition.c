@@ -1,76 +1,29 @@
 #include "acquisition.h"
 #include "ads1292.h"
 #include "i2c_sensors.h"
+#include "sd_dma.h"
 #include "main.h"
 #include "fatfs.h"
 #include "cmsis_os.h"
 #include <stdio.h>
 #include <string.h>
 
-/* ---- SD init (validated 4-bit 480 kHz) ---- */
-extern SD_HandleTypeDef hsd1;
 extern SPI_HandleTypeDef hspi1;
 
-static void sdmmc_gpio_very_high(void)
-{
-    GPIO_InitTypeDef g = {0};
-    g.Mode      = GPIO_MODE_AF_PP;
-    g.Pull      = GPIO_PULLUP;
-    g.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
-    g.Alternate = GPIO_AF12_SDMMC1;
-    g.Pin = GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_10 | GPIO_PIN_11 | GPIO_PIN_12;
-    HAL_GPIO_Init(GPIOC, &g);
-    g.Pin = GPIO_PIN_2;
-    HAL_GPIO_Init(GPIOD, &g);
-}
-
-static int sd_wait_transfer(uint32_t ms)
-{
-    uint32_t t0 = HAL_GetTick();
-    while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER) {
-        if (HAL_GetTick() - t0 > ms) return 0;
-        HAL_Delay(1);
-    }
-    return 1;
-}
-
-static uint8_t sd_init_4bit(void)
-{
-    hsd1.Init.ClockDiv = 10;
-    hsd1.Init.BusWide  = SDMMC_BUS_WIDE_1B;
-    if (HAL_SD_Init(&hsd1) != HAL_OK) return 0;
-    sdmmc_gpio_very_high();
-    if (!sd_wait_transfer(1000)) return 0;
-    if (HAL_SD_ConfigWideBusOperation(&hsd1, SDMMC_BUS_WIDE_4B) != HAL_OK) return 0;
-    MODIFY_REG(SDMMC1->CLKCR, SDMMC_CLKCR_CLKDIV, 100U);
-    HAL_Delay(20);
-    return sd_wait_transfer(500);
-}
-
 /* ====================================================================
- * Binary file format
+ * Text file format (CSV, for development / debugging)
  *
- * File header  — 32 bytes, written once at open:
- *   [0..3]   magic "AMS1"
- *   [4]      ADS ID register
- *   [5..13]  ADS registers: cfg1,cfg2,loff,ch1set,ch2set,rldsens,loffsens,resp1,resp2
- *   [14..19] RTC start time: sec,min,hr,date,mon,yr (BCD, from RV-3028-C7)
- *   [20..31] reserved 0x00
+ * Header line (written once):
+ *   tick_ms,ecg,loff
  *
- * Data block   — 5048 bytes, appended once per 1000-sample batch:
- *   [0..5]       RTC time at block flush: sec,min,hr,date,mon,yr (BCD)
- *   [6..7]       reserved 0x00
- *   [8..47]      uint32_t tick_snap[10]  — HAL_GetTick() at 100-sample boundaries (LE)
- *   [48..4047]   int32_t  ch1[1000]     — 24-bit ADC counts sign-extended to 32 bits (LE)
- *   [4048..5047] uint8_t  loff[1000]    — raw ADS status byte 0
+ * One line per ADS sample (1 kSPS):
+ *   <tick_ms>,<ecg_signed_decimal>,<loff_hex>\r\n
+ *   Example: 1234567,-23456,00\r\n   (~25 chars per line)
  *
- * f_sync every 10 blocks (~10 s); 3-blink LED signals safe-to-remove.
- *
- * Python:  python plot_ecg.py log_NNNN.bin
+ * f_sync every 10 × 1000-sample blocks (~10 s).
+ * LED: single toggle per 1000-sample block; 3 rapid blinks on sync.
  * ==================================================================== */
-#define ADS_BUF_LEN    1000
-#define BLOCK_HDR_SIZE 32
-#define BLOCK_SIZE     5048
+#define ADS_BUF_LEN 1000
 
 /* ---- RTOS objects ---- */
 static osSemaphoreId_t    s_drdy_sem;
@@ -87,14 +40,34 @@ typedef struct {
 static FATFS   s_fs;
 static FIL     s_file;
 static uint8_t s_file_open = 0;
+static char    s_log_name[16];
 
 static void find_log_name(char *buf, size_t sz)
 {
     for (uint16_t n = 0; n <= 9999; n++) {
-        snprintf(buf, sz, "log_%04u.bin", n);
+        snprintf(buf, sz, "log_%04u.txt", n);
         FILINFO fi;
         if (f_stat(buf, &fi) != FR_OK) return;
     }
+}
+
+/* Open the next available log file and write the CSV column header.
+ * Called from SDWriteTask for each new 1000-sample block. */
+static uint8_t open_next_log(void)
+{
+    find_log_name(s_log_name, sizeof(s_log_name));
+    if (f_open(&s_file, s_log_name, FA_CREATE_NEW | FA_WRITE) != FR_OK) return 0;
+    s_file_open = 1;
+    return 1;
+}
+
+/* Write a minimal CSV column header — used by SDWriteTask when opening
+ * subsequent files (ADS register read not safe from SDWriteTask context). */
+static void write_csv_header(void)
+{
+    UINT bw;
+    static const char hdr[] = "tick_ms,ecg,loff\r\n";
+    f_write(&s_file, hdr, sizeof(hdr) - 1, &bw);
 }
 
 /* ====================================================================
@@ -119,14 +92,10 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
  * ==================================================================== */
 uint8_t ACQ_Init(void)
 {
-    if (!sd_init_4bit()) return 0;
+    if (SD_DMA_Init() != HAL_OK) return 0;
     if (f_mount(&s_fs, SDPath, 1) != FR_OK) return 0;
 
-    char name[16];
-    find_log_name(name, sizeof(name));
-    if (f_open(&s_file, name, FA_CREATE_NEW | FA_WRITE) != FR_OK) return 0;
-
-    s_file_open = 1;
+    if (!open_next_log()) return 0;
     return 1;
 }
 
@@ -140,26 +109,24 @@ void ACQ_WriteDiagnostics(void)
 {
     if (!s_file_open) return;
 
-    uint8_t hdr[BLOCK_HDR_SIZE] = {0};
-    hdr[0] = 'A'; hdr[1] = 'M'; hdr[2] = 'S'; hdr[3] = '1';
-    hdr[4]  = ADS1292_ReadReg(0x00); /* ID */
-    hdr[5]  = ADS1292_ReadReg(0x01); /* CONFIG1 */
-    hdr[6]  = ADS1292_ReadReg(0x02); /* CONFIG2 */
-    hdr[7]  = ADS1292_ReadReg(0x03); /* LOFF */
-    hdr[8]  = ADS1292_ReadReg(0x04); /* CH1SET */
-    hdr[9]  = ADS1292_ReadReg(0x05); /* CH2SET */
-    hdr[10] = ADS1292_ReadReg(0x06); /* RLDSENS */
-    hdr[11] = ADS1292_ReadReg(0x07); /* LOFFSENS */
-    hdr[12] = ADS1292_ReadReg(0x09); /* RESP1 */
-    hdr[13] = ADS1292_ReadReg(0x0A); /* RESP2 */
+    char     buf[256];
+    UINT     bw;
     RTC_Time_t t = {0};
     RV3028_ReadTime(&t);
-    hdr[14] = t.sec; hdr[15] = t.min; hdr[16] = t.hr;
-    hdr[17] = t.date; hdr[18] = t.mon; hdr[19] = t.yr;
 
-    UINT bw;
-    f_write(&s_file, hdr, sizeof(hdr), &bw);
-    f_sync(&s_file);
+    int n = snprintf(buf, sizeof(buf),
+        "# AstroMowe ECG  ID=%02X CFG1=%02X CFG2=%02X LOFF=%02X"
+        " CH1=%02X CH2=%02X RESP1=%02X RESP2=%02X\r\n"
+        "# RTC start: %02X-%02X-%02X %02X:%02X:%02X\r\n"
+        "tick_ms,ecg,loff\r\n",
+        ADS1292_ReadReg(0x00), ADS1292_ReadReg(0x01),
+        ADS1292_ReadReg(0x02), ADS1292_ReadReg(0x03),
+        ADS1292_ReadReg(0x04), ADS1292_ReadReg(0x05),
+        ADS1292_ReadReg(0x09), ADS1292_ReadReg(0x0A),
+        t.yr, t.mon, t.date, t.hr, t.min, t.sec);
+    if (n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1; /* guard truncation */
+    f_write(&s_file, buf, (UINT)n, &bw);
+    /* no f_sync here — let the data flush naturally via the write buffer */
 }
 
 /* ====================================================================
@@ -211,61 +178,37 @@ void AcqTask(void *arg)
 
 /* ====================================================================
  * SDWriteTask — normal priority
- * Drains the queue, accumulates 1000-sample blocks, writes to SD.
+ * Drains the sample queue and writes one CSV line per sample.
+ * FatFS buffers internally (fil->buf[512]) so disk_write is called
+ * roughly every 20 samples (~512 / 25 bytes/line).
  * AcqTask keeps sampling while f_write runs here.
  * ==================================================================== */
 void SDWriteTask(void *arg)
 {
-    static int32_t  ch1[ADS_BUF_LEN];
-    static uint8_t  loff_buf[ADS_BUF_LEN];
-    static uint32_t tick_snap[ADS_BUF_LEN / 100];
-    uint16_t count       = 0;
-    uint8_t  block_count = 0;
+    uint32_t count = 0;
 
     for (;;) {
         Sample_t s;
         osMessageQueueGet(s_queue, &s, NULL, osWaitForever);
 
-        ch1[count]      = s.ch1;
-        loff_buf[count] = s.loff;
-        if (count % 100 == 0)
-            tick_snap[count / 100] = s.tick;
-        count++;
+        char  line[32];
+        UINT  bw;
+        int   len = snprintf(line, sizeof(line), "%lu,%ld,%02X\r\n",
+                             (unsigned long)s.tick, (long)s.ch1, (unsigned)s.loff);
+        FRESULT fr = f_write(&s_file, line, (UINT)len, &bw);
+        if (fr != FR_OK || bw != (UINT)len) {
+            for (;;) { HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10); osDelay(50); }
+        }
 
-        if (count >= ADS_BUF_LEN) {
-            uint8_t blk_hdr[8] = {0};
-            RTC_Time_t t = {0};
-            RV3028_ReadTime(&t);
-            blk_hdr[0] = t.sec; blk_hdr[1] = t.min; blk_hdr[2] = t.hr;
-            blk_hdr[3] = t.date; blk_hdr[4] = t.mon; blk_hdr[5] = t.yr;
-
-            UINT bw;
-            FRESULT fr;
-            fr  = f_write(&s_file, blk_hdr,   sizeof(blk_hdr),   &bw);
-            fr |= f_write(&s_file, tick_snap,  sizeof(tick_snap),  &bw);
-            fr |= f_write(&s_file, ch1,        sizeof(ch1),        &bw);
-            fr |= f_write(&s_file, loff_buf,   sizeof(loff_buf),   &bw);
-            if (fr != FR_OK) {
-                /* SD write failed — rapid blink to signal error */
-                for (;;) {
-                    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
-                    osDelay(50);
-                }
-            }
-
-            if (++block_count >= 10) {
-                f_sync(&s_file);
-                block_count = 0;
-                /* 3 rapid blinks = "synced, safe to remove SD card"
-                   osDelay yields CPU — AcqTask keeps sampling during blink */
-                for (int i = 0; i < 6; i++) {
-                    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
-                    osDelay(50);
-                }
-            } else {
-                HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
-            }
+        if (++count >= ADS_BUF_LEN) {
             count = 0;
+            HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
+
+            FRESULT fr_sync = f_sync(&s_file);
+            if (fr_sync != FR_OK) {
+                /* f_sync failed — 300 ms blink distinct from f_write 50 ms */
+                for (;;) { HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10); osDelay(300); }
+            }
         }
     }
 }
@@ -297,7 +240,7 @@ void ACQ_Stop(void)
  *   6 = (reserved) */
 uint8_t ACQ_SD_WriteTest(void)
 {
-    if (!sd_init_4bit()) return 1;
+    if (SD_DMA_Init() != HAL_OK) return 1;
     if (f_mount(&s_fs, SDPath, 1) != FR_OK) return 2;
 
     static FIL test_f;

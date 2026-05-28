@@ -54,7 +54,7 @@ static int sd_wait_transfer(uint32_t ms)
     uint32_t t0 = HAL_GetTick();
     while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER) {
         if (HAL_GetTick() - t0 > ms) return 0;
-        HAL_Delay(1);
+        osDelay(1); /* yield — lets AcqTask keep sampling while card is busy */
     }
     return 1;
 }
@@ -120,13 +120,19 @@ static void dma_reset_for_read(void)
 
 HAL_StatusTypeDef SD_DMA_Write(uint32_t sector_addr, const uint8_t *buf, uint32_t count)
 {
-    if (!sd_wait_transfer(1000)) return HAL_TIMEOUT;
+    if (!sd_wait_transfer(5000)) return HAL_TIMEOUT;
     SDMMC1->MASK = 0;
     SDMMC1->ICR  = 0x1FEFFFFFU;
     dma_reset_for_write();
     HAL_StatusTypeDef ret = HAL_SD_WriteBlocks_DMA(&hsd1, (uint8_t *)buf, sector_addr, count);
     if (ret != HAL_OK) return ret;
-    return wait_done(5000);
+    ret = wait_done(5000);
+    /* Clear all pending SDMMC flags after completion so no spurious interrupt
+     * can fire between here and the next HAL_SD_ReadBlocks (polling) call,
+     * which would find hsd1.State != READY and return HAL_BUSY. */
+    SDMMC1->MASK = 0;
+    SDMMC1->ICR  = 0x1FEFFFFFU;
+    return ret;
 }
 
 HAL_StatusTypeDef SD_DMA_Read(uint32_t sector_addr, uint8_t *buf, uint32_t count)

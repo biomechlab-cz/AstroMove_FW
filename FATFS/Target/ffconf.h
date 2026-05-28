@@ -189,7 +189,7 @@
 /  To enable Trim function, also CTRL_TRIM command should be implemented to the
 /  disk_ioctl() function. */
 
-#define _FS_NOFSINFO    0 /* 0,1,2 or 3 */
+#define _FS_NOFSINFO    3 /* 0,1,2 or 3 — disable FSInfo r/w; avoids write to sector 1 */
 /* If you need to know correct free space on the FAT32 volume, set bit 0 of this
 /  option, and f_getfree() function at first time after volume mount will force
 /  a full FAT scan. Bit 1 controls the use of last allocated cluster number.

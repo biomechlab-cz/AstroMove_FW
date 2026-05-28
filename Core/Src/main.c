@@ -168,7 +168,7 @@ int main(void)
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* ACQ_CreateRtosObjects(); -- disabled during DMA test */
+  ACQ_CreateRtosObjects();
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
@@ -184,11 +184,14 @@ int main(void)
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  /* ---- DMA test only — AcqTask / SDWriteTask disabled ---- */
-  static const osThreadAttr_t dma_test_attr = {
-    .name = "DmaTest", .stack_size = 2048, .priority = osPriorityNormal
+  static const osThreadAttr_t acq_attr = {
+    .name = "AcqTask", .stack_size = 4096, .priority = osPriorityAboveNormal
   };
-  osThreadNew(SD_DMA_Test, NULL, &dma_test_attr);
+  static const osThreadAttr_t sdw_attr = {
+    .name = "SDWrite", .stack_size = 2048, .priority = osPriorityNormal
+  };
+  osThreadNew(AcqTask,      NULL, &acq_attr);
+  osThreadNew(SDWriteTask,  NULL, &sdw_attr);
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
