@@ -192,6 +192,19 @@ void ACQ_WriteDiagnostics(void)
     f_sync(&s_file); /* sync once after header */
 }
 
+static void blink_error(uint8_t count)
+{
+    while (1) {
+        HAL_Delay(1000);
+        for (uint8_t i = 0; i < count; i++) {
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+            HAL_Delay(80);
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+            HAL_Delay(80);
+        }
+    }
+}
+
 void ACQ_Process(void)
 {
     if (!g_drdy_flag) return;
@@ -228,19 +241,22 @@ void ACQ_Process(void)
         s_fwrite_last_ms = 0;
 
         UINT bw;
+        FRESULT fr;
         uint32_t tw0 = HAL_GetTick();
-        f_write(&s_file, blk_hdr,     sizeof(blk_hdr),     &bw);
-        f_write(&s_file, s_tick_snap, sizeof(s_tick_snap),  &bw);
-        f_write(&s_file, s_ch1,       sizeof(s_ch1),        &bw);
-        f_write(&s_file, s_loff,      sizeof(s_loff),       &bw);
+        fr  = f_write(&s_file, blk_hdr,     sizeof(blk_hdr),     &bw);
+        fr |= f_write(&s_file, s_tick_snap, sizeof(s_tick_snap),  &bw);
+        fr |= f_write(&s_file, s_ch1,       sizeof(s_ch1),        &bw);
+        fr |= f_write(&s_file, s_loff,      sizeof(s_loff),       &bw);
         s_fwrite_last_ms = HAL_GetTick() - tw0;
+        if (fr != FR_OK) blink_error(2);
 
         static uint8_t s_block_count = 0;
         if (++s_block_count >= 10) {
             uint32_t ts0 = HAL_GetTick();
-            f_sync(&s_file);
+            fr = f_sync(&s_file);
             s_fsync_last_ms = HAL_GetTick() - ts0;
             s_block_count = 0;
+            if (fr != FR_OK) blink_error(3);
         }
         HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
         s_count = 0;
