@@ -144,6 +144,7 @@ int main(void)
   /* Init SD (4-bit 480 kHz) */
   if (!ACQ_Init()) {
       while (1) {
+        //Blink LED
           HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
           HAL_Delay(100);
       }
