@@ -1,0 +1,4 @@
+C:/AstroMowe_base/AstroMoveCubeMX/Core/Src/sd_card.c:7:9:SD_Card_Init	8	static
+C:/AstroMowe_base/AstroMoveCubeMX/Core/Src/sd_card.c:14:9:SD_Card_Write	592	static
+C:/AstroMowe_base/AstroMoveCubeMX/Core/Src/sd_card.c:24:9:SD_Card_Append	592	static
+C:/AstroMowe_base/AstroMoveCubeMX/Core/Src/sd_card.c:34:6:SD_Card_Deinit	8	static

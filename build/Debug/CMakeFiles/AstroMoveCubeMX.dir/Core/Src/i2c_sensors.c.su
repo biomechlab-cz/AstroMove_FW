@@ -1,0 +1,5 @@
+C:/AstroMowe_base/AstroMoveCubeMX/Core/Src/i2c_sensors.c:12:6:I2C_Sensors_Init	40	static
+C:/AstroMowe_base/AstroMoveCubeMX/Core/Src/i2c_sensors.c:30:9:ISM330_ReadSample	48	static
+C:/AstroMowe_base/AstroMoveCubeMX/Core/Src/i2c_sensors.c:46:9:MMC5983_ReadSample	48	static
+C:/AstroMowe_base/AstroMoveCubeMX/Core/Src/i2c_sensors.c:72:9:RV3028_ReadTime	40	static
+C:/AstroMowe_base/AstroMoveCubeMX/Core/Src/i2c_sensors.c:87:9:RV3028_SetTime	40	static
