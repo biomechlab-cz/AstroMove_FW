@@ -1,8 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"C:/AstroMowe_base/AstroMoveCubeMX/build/Debug/cmake_install.cmake",
-		"C:/AstroMowe_base/AstroMoveCubeMX/build/Debug/cmake/stm32cubemx/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

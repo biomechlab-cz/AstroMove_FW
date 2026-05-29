@@ -108,7 +108,9 @@ static uint8_t sd_init_4bit(void)
 #define BLOCK_SIZE     5048 /* per-batch data block (8-byte RTC header + 5040 data) */
 
 /* ---- sample buffers ---- */
+static int32_t  s_stat[ADS_BUF_LEN];
 static int32_t  s_ch1[ADS_BUF_LEN];
+static int32_t  s_ch2[ADS_BUF_LEN];
 static uint8_t  s_loff[ADS_BUF_LEN];
 static uint32_t s_tick_snap[ADS_BUF_LEN / 100]; /* HAL_GetTick() at 100-sample boundaries */
 static uint16_t s_count = 0;
@@ -198,9 +200,15 @@ void ACQ_Process(void)
     uint8_t raw[9] = {0};
     ADS1292_ReadRaw(raw);
 
+    // s_stat[s_count]  = ((int32_t)((uint32_t)raw[0] << 24 |
+    //                               (uint32_t)raw[1] << 16 |
+    //                               (uint32_t)raw[2] << 8)) >> 8;
     s_ch1[s_count]  = ((int32_t)((uint32_t)raw[3] << 24 |
                                   (uint32_t)raw[4] << 16 |
                                   (uint32_t)raw[5] << 8)) >> 8;
+    // s_ch2[s_count]  = ((int32_t)((uint32_t)raw[6] << 24 |
+    //                               (uint32_t)raw[7] << 16 |
+    //                               (uint32_t)raw[8] << 8)) >> 8;
     s_loff[s_count] = raw[0];
     if (s_count % 100 == 0)
         s_tick_snap[s_count / 100] = HAL_GetTick();
