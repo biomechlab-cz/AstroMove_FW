@@ -1,37 +1,51 @@
 #include "i2c_sensors.h"
 
-/* ISM330DHCX: SDO=GND → 7-bit 0x6A */
-#define ISM330_ADDR  0xD4
+/* ISM330DHCX: 7-bit 0x6A (SDO=GND) or 0x6B (SDO=VDD) — probed at init */
+#define ISM330_ADDR_L 0xD4
+#define ISM330_ADDR_H 0xD6
 /* MMC5983MA: 7-bit 0x30 */
 #define MMC5983_ADDR 0x60
 /* RV-3028-C7:  7-bit 0x52 */
 #define RV3028_ADDR  0xA4
 
 static I2C_HandleTypeDef *_hi2c;
+static uint8_t _ism_addr = ISM330_ADDR_L;
 
 void I2C_Sensors_Init(I2C_HandleTypeDef *hi2c)
 {
     _hi2c = hi2c;
 
+    /* The SDO address strap differs between board builds — probe it */
+    if (HAL_I2C_IsDeviceReady(_hi2c, ISM330_ADDR_L, 2, 10) == HAL_OK)
+        _ism_addr = ISM330_ADDR_L;
+    else if (HAL_I2C_IsDeviceReady(_hi2c, ISM330_ADDR_H, 2, 10) == HAL_OK)
+        _ism_addr = ISM330_ADDR_H;
+
     /* ISM330DHCX: CTRL1_XL = 0x50 (208Hz, ±2g)
                    CTRL2_G  = 0x50 (208Hz, ±250dps) */
     uint8_t val = 0x50;
-    HAL_I2C_Mem_Write(_hi2c, ISM330_ADDR, 0x10, I2C_MEMADD_SIZE_8BIT, &val, 1, 100);
-    HAL_I2C_Mem_Write(_hi2c, ISM330_ADDR, 0x11, I2C_MEMADD_SIZE_8BIT, &val, 1, 100);
+    HAL_I2C_Mem_Write(_hi2c, _ism_addr, 0x10, I2C_MEMADD_SIZE_8BIT, &val, 1, 100);
+    HAL_I2C_Mem_Write(_hi2c, _ism_addr, 0x11, I2C_MEMADD_SIZE_8BIT, &val, 1, 100);
 
-    /* MMC5983MA: SET pulse to initialize magnetization, then BW=00 (100 Hz bandwidth) */
+    /* MMC5983MA: SET pulse to initialize magnetization, then continuous
+       measurement at 100 Hz with automatic set/reset — MMC5983_ReadSample
+       just fetches the latest result. */
     val = 0x08;  /* Ctrl0: DO_SET */
     HAL_I2C_Mem_Write(_hi2c, MMC5983_ADDR, 0x09, I2C_MEMADD_SIZE_8BIT, &val, 1, 100);
     HAL_Delay(1);
-    val = 0x00;  /* Ctrl1: BW[1:0]=00 → 100 Hz bandwidth */
+    val = 0x20;  /* Ctrl0: Auto_SR_en — periodic set/reset against drift */
+    HAL_I2C_Mem_Write(_hi2c, MMC5983_ADDR, 0x09, I2C_MEMADD_SIZE_8BIT, &val, 1, 100);
+    val = 0x00;  /* Ctrl1: BW[1:0]=00 → 8 ms measurement time */
     HAL_I2C_Mem_Write(_hi2c, MMC5983_ADDR, 0x0A, I2C_MEMADD_SIZE_8BIT, &val, 1, 100);
+    val = 0x0D;  /* Ctrl2: Cmm_en | CM_FREQ=100 Hz */
+    HAL_I2C_Mem_Write(_hi2c, MMC5983_ADDR, 0x0B, I2C_MEMADD_SIZE_8BIT, &val, 1, 100);
 }
 
 uint8_t ISM330_ReadSample(ISM330_Data_t *out)
 {
     uint8_t buf[12];
     /* Burst read: OUTX_L_G (0x22) through OUTZ_H_XL (0x2D) */
-    if (HAL_I2C_Mem_Read(_hi2c, ISM330_ADDR, 0x22, I2C_MEMADD_SIZE_8BIT, buf, 12, 100) != HAL_OK)
+    if (HAL_I2C_Mem_Read(_hi2c, _ism_addr, 0x22, I2C_MEMADD_SIZE_8BIT, buf, 12, 100) != HAL_OK)
         return 0;
 
     out->gx = (int16_t)(buf[1]  << 8 | buf[0]);
@@ -47,7 +61,7 @@ int16_t ISM330_ReadTemperatureTenths(void)
 {
     uint8_t buf[2];
     /* OUT_TEMP_L/H (0x20/0x21): 25 °C + raw/256 per LSB */
-    if (HAL_I2C_Mem_Read(_hi2c, ISM330_ADDR, 0x20, I2C_MEMADD_SIZE_8BIT, buf, 2, 100) != HAL_OK)
+    if (HAL_I2C_Mem_Read(_hi2c, _ism_addr, 0x20, I2C_MEMADD_SIZE_8BIT, buf, 2, 100) != HAL_OK)
         return INT16_MIN;
     int16_t raw = (int16_t)(buf[1] << 8 | buf[0]);
     return (int16_t)(250 + ((int32_t)raw * 10) / 256);
@@ -55,20 +69,9 @@ int16_t ISM330_ReadTemperatureTenths(void)
 
 uint8_t MMC5983_ReadSample(MMC5983_Data_t *out)
 {
-    /* Trigger single measurement */
-    uint8_t ctrl = 0x01;  /* Ctrl0: TM_M */
-    HAL_I2C_Mem_Write(_hi2c, MMC5983_ADDR, 0x09, I2C_MEMADD_SIZE_8BIT, &ctrl, 1, 10);
-
-    /* Poll Meas_M_Done (Status reg 0x08, bit 0) — measurement takes <1 ms at BW=00 */
-    uint8_t status = 0;
-    uint32_t t0 = HAL_GetTick();
-    while (!(status & 0x01)) {
-        HAL_I2C_Mem_Read(_hi2c, MMC5983_ADDR, 0x08, I2C_MEMADD_SIZE_8BIT, &status, 1, 10);
-        if (HAL_GetTick() - t0 > 5) return 0;
-    }
-
-    /* Burst read registers 0x00-0x06: X[17:10], X[9:2], Y[17:10], Y[9:2],
-       Z[17:10], Z[9:2], {X[1:0],Y[1:0],Z[1:0]} */
+    /* Continuous mode at 100 Hz — output registers always hold the latest
+       measurement. Burst read registers 0x00-0x06: X[17:10], X[9:2],
+       Y[17:10], Y[9:2], Z[17:10], Z[9:2], {X[1:0],Y[1:0],Z[1:0]} */
     uint8_t buf[7];
     if (HAL_I2C_Mem_Read(_hi2c, MMC5983_ADDR, 0x00, I2C_MEMADD_SIZE_8BIT, buf, 7, 20) != HAL_OK)
         return 0;

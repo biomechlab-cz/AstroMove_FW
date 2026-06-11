@@ -10,12 +10,20 @@
  *   SNNNNNNN.EMX — encrypted binary measurement file
  *   SNNNNNNN.CSV — plaintext control file, one row per batch
  *
- * Data is delivered in 1-second chunks of REC_CHUNK_SAMPLES EMG samples.
- * REC_CHUNKS_PER_BATCH chunks form one independently encrypted batch
- * (AES-256-GCM, hardware accelerated). */
+ * Data is delivered in 1-second chunks of REC_CHUNK_SAMPLES EMG samples
+ * plus REC_CHUNK_IMU_SAMPLES IMU samples. REC_CHUNKS_PER_BATCH chunks form
+ * one independently encrypted batch (AES-256-GCM, hardware accelerated). */
 
-#define REC_CHUNK_SAMPLES     1000  /* EMG samples per chunk (1 s at 1 kHz) */
-#define REC_CHUNKS_PER_BATCH  10    /* batch duration in seconds */
+#define REC_CHUNK_SAMPLES      1000 /* EMG samples per chunk (1 s at 1 kHz) */
+#define REC_CHUNK_IMU_SAMPLES  100  /* IMU samples per chunk (1 s at 100 Hz) */
+#define REC_CHUNKS_PER_BATCH   10   /* batch duration in seconds */
+
+/* One IMU sample, stored in the payload as-is (little-endian, 24 bytes). */
+typedef struct {
+    int16_t  ax, ay, az;  /* accel — ±2 g, 16384 LSB/g */
+    int16_t  gx, gy, gz;  /* gyro  — ±250 dps, 131 LSB/dps */
+    uint32_t mx, my, mz;  /* mag   — 18-bit unsigned, null field = 131072 */
+} REC_ImuSample;
 
 /* error_flags bits reported in the control CSV */
 #define REC_ERR_WRITE    0x01  /* f_write failed or wrote short */
@@ -37,6 +45,7 @@ uint8_t REC_Open(const uint8_t ads_regs[10]);
    Returns 0 on unrecoverable storage failure. */
 uint8_t REC_WriteChunk(const int32_t ch1[REC_CHUNK_SAMPLES],
                        const uint8_t loff[REC_CHUNK_SAMPLES],
+                       const REC_ImuSample imu[REC_CHUNK_IMU_SAMPLES],
                        uint32_t dropped_samples);
 
 /* Finalize an in-progress batch (marked REC_ERR_PARTIAL) and close both

@@ -28,7 +28,8 @@ uint8_t ISM330_ReadSample(ISM330_Data_t *out);
    Returns INT16_MIN if the sensor does not respond. */
 int16_t ISM330_ReadTemperatureTenths(void);
 
-/* Trigger single measurement and read 18-bit X/Y/Z. Returns 1 on success. */
+/* Read the latest 18-bit X/Y/Z of the 100 Hz continuous measurement.
+   Returns 1 on success. */
 uint8_t MMC5983_ReadSample(MMC5983_Data_t *out);
 
 uint8_t RV3028_ReadTime(RTC_Time_t *out);

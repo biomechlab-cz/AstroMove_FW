@@ -2,7 +2,8 @@
 """Decode an encrypted EMGX recording (format v1, see recording.c).
 
 Decrypts each batch with AES-256-GCM, verifies the authentication tag and
-the plaintext CRC32, and exports samples to CSV.
+the plaintext CRC32, and exports samples to CSV: EMG to <input>_data.csv
+and, for payload type 2 recordings, IMU to <input>_imu.csv.
 
 Usage:
     python decode_emgx.py S0000001.EMX
@@ -14,6 +15,7 @@ import argparse
 import struct
 import sys
 import zlib
+from contextlib import nullcontext
 from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -26,8 +28,13 @@ TEST_KEY = bytes(range(32))
 FILE_HEADER_SIZE = 64
 BATCH_HEADER_SIZE = 48
 TRAILER_SIZE = 24
-CHUNK_SAMPLES = 1000
-CHUNK_BYTES = CHUNK_SAMPLES * 5  # int32 ch1 + uint8 loff per sample
+CHUNK_SAMPLES = 1000           # EMG samples per 1 s chunk
+CHUNK_EMG_BYTES = CHUNK_SAMPLES * 5    # int32 ch1 + uint8 loff per sample
+IMU_SAMPLES = 100              # IMU samples per chunk (payload type 2)
+IMU_STRUCT = struct.Struct("<6h3I")    # ax,ay,az,gx,gy,gz, mx,my,mz (24 B)
+# chunk size by payload type: 1 = EMG only, 2 = EMG + IMU
+CHUNK_BYTES = {1: CHUNK_EMG_BYTES,
+               2: CHUNK_EMG_BYTES + IMU_SAMPLES * IMU_STRUCT.size}
 
 
 def bcd_timestamp(b):
@@ -59,7 +66,7 @@ def parse_file_header(h):
         sys.exit(f"Unsupported format version {info['version']}")
     if info["cipher_id"] != 1:
         sys.exit(f"Unsupported cipher id {info['cipher_id']} (expected 1 = AES-256-GCM)")
-    if info["payload_type"] != 1:
+    if info["payload_type"] not in CHUNK_BYTES:
         sys.exit(f"Unsupported payload type {info['payload_type']}")
     return info
 
@@ -79,10 +86,12 @@ def legacy_decrypt(key, nonce, ct):
     return swap32(dec.update(swap32(ct)) + dec.finalize())
 
 
-def decode_batches(data, key, csv_out, legacy=False):
+def decode_batches(data, key, csv_out, imu_out=None, chunk_bytes=CHUNK_BYTES[1],
+                   legacy=False):
     aes = AESGCM(key)
     pos = FILE_HEADER_SIZE
     sample_index = 0
+    imu_index = 0
     n_ok = n_bad = 0
 
     while pos + BATCH_HEADER_SIZE <= len(data):
@@ -130,13 +139,18 @@ def decode_batches(data, key, csv_out, legacy=False):
         if zlib.crc32(pt) != crc_stored:
             status.append("CRC MISMATCH")
 
-        for chunk_off in range(0, len(pt), CHUNK_BYTES):
-            chunk = pt[chunk_off:chunk_off + CHUNK_BYTES]
+        for chunk_off in range(0, len(pt), chunk_bytes):
+            chunk = pt[chunk_off:chunk_off + chunk_bytes]
             ch1 = struct.unpack_from(f"<{CHUNK_SAMPLES}i", chunk, 0)
-            loff = chunk[CHUNK_SAMPLES * 4:]
+            loff = chunk[CHUNK_SAMPLES * 4:CHUNK_EMG_BYTES]
             for i in range(CHUNK_SAMPLES):
                 csv_out.write(f"{sample_index},{batch_index},{ch1[i]},0x{loff[i]:02X}\n")
                 sample_index += 1
+            if imu_out is not None:
+                for s in IMU_STRUCT.iter_unpack(chunk[CHUNK_EMG_BYTES:]):
+                    imu_out.write(f"{imu_index},{batch_index},"
+                                  + ",".join(str(v) for v in s) + "\n")
+                    imu_index += 1
 
         n_ok += 1
         note = f" [{', '.join(status)}]" if status else ""
@@ -144,7 +158,7 @@ def decode_batches(data, key, csv_out, legacy=False):
               f"start {start_time}, tag OK{note}")
         pos = end
 
-    return n_ok, n_bad, sample_index
+    return n_ok, n_bad, sample_index, imu_index
 
 
 def main():
@@ -169,18 +183,27 @@ def main():
     info = parse_file_header(data[:FILE_HEADER_SIZE])
 
     print(f"Session {info['session_id']}, started {info['start_time']}, "
-          f"EMG {info['emg_rate_hz']} Hz, device UID {info['device_uid']}")
+          f"EMG {info['emg_rate_hz']} Hz, IMU {info['imu_rate_hz']} Hz, "
+          f"device UID {info['device_uid']}")
     print(f"Key id {info['key_id']} v{info['key_version']}, "
           f"ADS regs {info['ads_regs']}")
 
     out_path = args.output or args.file.with_name(args.file.stem + "_data.csv")
-    with open(out_path, "w", newline="") as csv_out:
+    has_imu = info["payload_type"] == 2
+    imu_path = out_path.with_name(out_path.stem.removesuffix("_data") + "_imu.csv")
+    with open(out_path, "w", newline="") as csv_out, \
+         open(imu_path, "w", newline="") if has_imu else nullcontext() as imu_out:
         csv_out.write("sample_index,batch_index,ch1,loff\n")
-        n_ok, n_bad, n_samples = decode_batches(data, key, csv_out,
-                                                legacy=args.legacy_swap32)
+        if has_imu:
+            imu_out.write("imu_index,batch_index,ax,ay,az,gx,gy,gz,mx,my,mz\n")
+        n_ok, n_bad, n_samples, n_imu = decode_batches(
+            data, key, csv_out, imu_out,
+            chunk_bytes=CHUNK_BYTES[info["payload_type"]],
+            legacy=args.legacy_swap32)
 
     print(f"Done: {n_ok} batches OK, {n_bad} failed, "
-          f"{n_samples} samples -> {out_path}")
+          f"{n_samples} EMG samples -> {out_path}"
+          + (f", {n_imu} IMU samples -> {imu_path}" if has_imu else ""))
 
 
 if __name__ == "__main__":

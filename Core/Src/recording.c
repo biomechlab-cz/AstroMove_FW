@@ -8,13 +8,13 @@
  *   [0..3]   magic "EMGX"
  *   [4]      format version = 1
  *   [5]      header size = 64
- *   [6]      payload type = 1 (per chunk: int32 ch1[1000] LE + uint8 loff[1000])
+ *   [6]      payload type = 2 (chunk layout below; 1 = old EMG-only chunks)
  *   [7]      batch duration, seconds = 10
  *   [8..11]  session id (matches filename)
  *   [12..23] MCU 96-bit unique device ID
  *   [24..29] acquisition start time, RTC BCD: sec,min,hr,date,mon,yr
  *   [30..31] EMG sample rate, Hz = 1000
- *   [32..33] IMU sample rate, Hz = 0 (IMU not recorded yet)
+ *   [32..33] IMU sample rate, Hz = 100
  *   [34]     cipher id = 1 (AES-256-GCM)
  *   [35]     key id, [36] key version
  *   [37..39] reserved
@@ -22,6 +22,12 @@
  *   [48..57] ADS1292R registers: ID,CONFIG1,CONFIG2,LOFF,CH1SET,CH2SET,
  *            RLDSENS,LOFFSENS,RESP1,RESP2
  *   [58..63] reserved
+ *
+ * Payload type 2 chunk (7400 bytes, one per second):
+ *   int32 ch1[1000] LE              EMG, 24-bit ADC counts sign-extended
+ *   uint8 loff[1000]                ADS status byte (lead-off in bits 6:4)
+ *   REC_ImuSample imu[100]          see recording.h — accel/gyro int16,
+ *                                   mag uint32, 24 bytes per sample
  *
  * Batch — header (48 B, plaintext), encrypted payload, trailer (24 B):
  *   header:
@@ -66,12 +72,19 @@ extern CRYP_HandleTypeDef hcryp; /* defined in main.c */
 #define BATCH_HEADER_SIZE  48
 #define BATCH_TRAILER_SIZE 24
 #define FORMAT_VERSION     1
-#define PAYLOAD_TYPE_CH1_LOFF 1
+#define PAYLOAD_TYPE_CH1_LOFF_IMU 2
 #define CIPHER_AES256GCM   1
+#define EMG_RATE_HZ        1000
+#define IMU_RATE_HZ        100
 
-#define CHUNK_BYTES        (REC_CHUNK_SAMPLES * 5)             /* int32 + status byte per sample */
+#define CHUNK_EMG_BYTES    (REC_CHUNK_SAMPLES * 5)             /* int32 + status byte per sample */
+#define CHUNK_IMU_BYTES    (REC_CHUNK_IMU_SAMPLES * sizeof(REC_ImuSample))
+#define CHUNK_BYTES        (CHUNK_EMG_BYTES + CHUNK_IMU_BYTES)
 #define BATCH_EMG_SAMPLES  (REC_CHUNK_SAMPLES * REC_CHUNKS_PER_BATCH)
+#define BATCH_IMU_SAMPLES  (REC_CHUNK_IMU_SAMPLES * REC_CHUNKS_PER_BATCH)
 #define BATCH_PAYLOAD_BYTES (CHUNK_BYTES * REC_CHUNKS_PER_BATCH)
+
+_Static_assert(sizeof(REC_ImuSample) == 24, "REC_ImuSample is stored as-is");
 
 #define GCM_TIMEOUT_MS     100
 
@@ -268,8 +281,7 @@ static uint32_t gcm_finish(uint8_t *out, uint8_t tag[16], uint32_t total_len)
 /* ====================================================================
  * Batch handling
  * ==================================================================== */
-static void build_batch_header(uint8_t h[BATCH_HEADER_SIZE],
-                               uint32_t emg_samples, uint32_t payload_bytes)
+static void build_batch_header(uint8_t h[BATCH_HEADER_SIZE], uint32_t chunks)
 {
     memset(h, 0, BATCH_HEADER_SIZE);
     memcpy(h, "BTCH", 4);
@@ -277,10 +289,10 @@ static void build_batch_header(uint8_t h[BATCH_HEADER_SIZE],
     h[8]  = s_batch_start.sec;  h[9]  = s_batch_start.min; h[10] = s_batch_start.hr;
     h[11] = s_batch_start.date; h[12] = s_batch_start.mon; h[13] = s_batch_start.yr;
     h[14] = REC_CHUNKS_PER_BATCH;
-    put_u32(h + 16, emg_samples);
-    put_u32(h + 20, 0);             /* IMU sample count */
-    put_u32(h + 24, payload_bytes);
-    put_u32(h + 28, payload_bytes); /* ciphertext size equals plaintext size */
+    put_u32(h + 16, chunks * REC_CHUNK_SAMPLES);     /* EMG sample count */
+    put_u32(h + 20, chunks * REC_CHUNK_IMU_SAMPLES); /* IMU sample count */
+    put_u32(h + 24, chunks * CHUNK_BYTES);           /* plaintext payload bytes */
+    put_u32(h + 28, chunks * CHUNK_BYTES);           /* ciphertext size equals plaintext */
     memcpy(h + 32, s_nonce, 12);
 }
 
@@ -299,7 +311,7 @@ static uint8_t rec_begin_batch(void)
        in progress is already scannable; rewritten only on early stop. */
     s_batch_hdr_pos = f_tell(&s_emgx);
     uint8_t hdr[BATCH_HEADER_SIZE];
-    build_batch_header(hdr, BATCH_EMG_SAMPLES, BATCH_PAYLOAD_BYTES);
+    build_batch_header(hdr, REC_CHUNKS_PER_BATCH);
     if (!timed_write(hdr, sizeof(hdr), 4))
         return 0;
 
@@ -329,11 +341,12 @@ static void rec_append_csv_row(void)
 
     char row[160];
     int len = snprintf(row, sizeof(row),
-        "%lu,%lu,%s,%s,%lu,0,%lu,%lu,%lu,%08lX,%lu,%s,0x%02X,%s\r\n",
+        "%lu,%lu,%s,%s,%lu,%lu,%lu,%lu,%lu,%08lX,%lu,%s,0x%02X,%s\r\n",
         (unsigned long)s_session_id,
         (unsigned long)s_batch_index,
         ts_start, ts_end,
         (unsigned long)(s_chunk_count * REC_CHUNK_SAMPLES),
+        (unsigned long)(s_chunk_count * REC_CHUNK_IMU_SAMPLES),
         (unsigned long)s_payload_bytes,
         (unsigned long)s_payload_bytes,
         (unsigned long)s_write_ms,
@@ -367,7 +380,7 @@ static uint8_t rec_end_batch(void)
         /* stopped early — rewrite the batch header with the real counts */
         s_error_flags |= REC_ERR_PARTIAL;
         uint8_t hdr[BATCH_HEADER_SIZE];
-        build_batch_header(hdr, s_chunk_count * REC_CHUNK_SAMPLES, s_payload_bytes);
+        build_batch_header(hdr, s_chunk_count);
         FSIZE_t end_pos = f_tell(&s_emgx);
         UINT bw;
         f_lseek(&s_emgx, s_batch_hdr_pos);
@@ -433,7 +446,7 @@ uint8_t REC_Open(const uint8_t ads_regs[10])
     memcpy(hdr, "EMGX", 4);
     hdr[4] = FORMAT_VERSION;
     hdr[5] = FILE_HEADER_SIZE;
-    hdr[6] = PAYLOAD_TYPE_CH1_LOFF;
+    hdr[6] = PAYLOAD_TYPE_CH1_LOFF_IMU;
     hdr[7] = REC_CHUNKS_PER_BATCH;
     put_u32(hdr + 8, s_session_id);
     put_u32(hdr + 12, HAL_GetUIDw0());
@@ -441,8 +454,8 @@ uint8_t REC_Open(const uint8_t ads_regs[10])
     put_u32(hdr + 20, HAL_GetUIDw2());
     hdr[24] = start.sec;  hdr[25] = start.min; hdr[26] = start.hr;
     hdr[27] = start.date; hdr[28] = start.mon; hdr[29] = start.yr;
-    put_u16(hdr + 30, 1000); /* EMG sample rate, Hz */
-    put_u16(hdr + 32, 0);    /* IMU sample rate, Hz — not recorded */
+    put_u16(hdr + 30, EMG_RATE_HZ);
+    put_u16(hdr + 32, IMU_RATE_HZ);
     hdr[34] = CIPHER_AES256GCM;
     hdr[35] = REC_KEY_ID;
     hdr[36] = REC_KEY_VERSION;
@@ -485,6 +498,7 @@ uint8_t REC_Open(const uint8_t ads_regs[10])
 
 uint8_t REC_WriteChunk(const int32_t ch1[REC_CHUNK_SAMPLES],
                        const uint8_t loff[REC_CHUNK_SAMPLES],
+                       const REC_ImuSample imu[REC_CHUNK_IMU_SAMPLES],
                        uint32_t dropped_samples)
 {
     if (!s_open) return 0;
@@ -494,11 +508,14 @@ uint8_t REC_WriteChunk(const int32_t ch1[REC_CHUNK_SAMPLES],
         return 0;
 
     const uint8_t *ch1_bytes = (const uint8_t *)ch1; /* int32 LE on Cortex-M */
+    const uint8_t *imu_bytes = (const uint8_t *)imu;
     s_crc = crc32_update(s_crc, ch1_bytes, REC_CHUNK_SAMPLES * 4);
     s_crc = crc32_update(s_crc, loff, REC_CHUNK_SAMPLES);
+    s_crc = crc32_update(s_crc, imu_bytes, CHUNK_IMU_BYTES);
 
     uint32_t n = gcm_update(ch1_bytes, REC_CHUNK_SAMPLES * 4, s_ct);
     n += gcm_update(loff, REC_CHUNK_SAMPLES, s_ct + n);
+    n += gcm_update(imu_bytes, CHUNK_IMU_BYTES, s_ct + n);
     if (!timed_write(s_ct, n, 5))
         return 0;
     s_payload_bytes += CHUNK_BYTES;

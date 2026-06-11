@@ -33,7 +33,7 @@ I2C2 permanently disabled — PB11 repurposed as TPS_ON GPIO.
 |---------|--------|-------|
 | USART1 Hello World | in progress | 115200 8N1, ST-Link V3 MINI virtual COM |
 | SDMMC1 + FatFS write | working | 1-bit mode, ClockDiv=10, GPIO_PULLUP/MEDIUM; D1-D3 bad solder on board 05 |
-| ISM330DHCX (IMU) | working | I2C addr 0x6A, WHO_AM_I=0x6B, 208Hz ±2g/±250dps |
+| ISM330DHCX (IMU) | **not responding** (found 2026-06-11) | NACKs at both 0x6A and 0x6B (addr auto-probed at init); mag+RTC on same bus fine → chip dead or unpowered. Accel/gyro record as zeros |
 | MMC5983MA (mag) | working | I2C addr 0x30, board 04 only; board 05 chip dead |
 | RV-3028-C7 (RTC) | working | I2C addr 0x52; time not yet set |
 | ADS1292R (ECG ADC) | working | SPI1, ID=0x53, CPOL=0 CPHA=1, 500 kHz, 1 kSPS (CONFIG1=0x83 HR=1); DRDY non-functional on board 04 — use SDATAC+RDATA polling; EMG capture confirmed |
@@ -45,7 +45,8 @@ I2C2 permanently disabled — PB11 repurposed as TPS_ON GPIO.
 - Files per session: `SNNNNNNN.EMX` + `SNNNNNNN.CSV` (8.3 names — FatFS `_USE_LFN=0`; enable LFN in CubeMX for the spec's `SESSION_NNNNNNN.emgx`)
 - Desktop decoder: `decode_emgx.py` (needs `pip install cryptography`); `plot_ecg.py` is for the old pre-EMGX `log_NNNN.bin` format
 - GCM nonce = session start time + session id + batch index — RTC must be set for cross-session uniqueness under the fixed key
-- IMU not recorded yet (header reserves rate/count fields); EMG = ADS ch1 int32 + lead-off status byte per sample
+- IMU recorded at 100 Hz (payload type 2): accel+gyro int16 (ISM330, currently zeros — chip not responding) + mag 18-bit uint32 (MMC5983 continuous mode); IMU slots derived from the EMG sample clock (every 10th sample) so counts are exact; sample-and-hold across blocking writes and on I2C failure (`g_ism_fail_count`/`g_mag_fail_count`)
+- EMG = ADS ch1 int32 + lead-off status byte per sample
 
 ## Board 04 quirks found 2026-06-10/11
 - **BOOT0 pin reads high** — option bytes set to `nSWBOOT0=0, nBOOT0=1` (always boot main flash, BOOT0 pin ignored). Without this the MCU boots into the ROM bootloader and the firmware never runs. Re-apply after any full chip erase / option-byte reset.

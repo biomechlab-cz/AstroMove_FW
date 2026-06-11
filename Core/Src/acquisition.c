@@ -1,5 +1,6 @@
 #include "acquisition.h"
 #include "ads1292.h"
+#include "i2c_sensors.h"
 #include "recording.h"
 #include "main.h"
 #include "fatfs.h"
@@ -92,7 +93,39 @@ static int32_t  s_ch1[REC_CHUNK_SAMPLES];   /* 24-bit ADC counts sign-extended *
 static uint8_t  s_loff[REC_CHUNK_SAMPLES];  /* raw ADS status byte 0 (lead-off in bits 6:4) */
 static uint16_t s_count = 0;
 
+/* IMU slots — one per 10 EMG samples, so the IMU grid is derived from the
+   ADS sample clock and every chunk holds exactly REC_CHUNK_IMU_SAMPLES.
+   Slots filled while draining; after a blocking SD write the catch-up
+   slots repeat the sensor's then-current reading (sample-and-hold). */
+static REC_ImuSample s_imu[REC_CHUNK_IMU_SAMPLES];
+static REC_ImuSample s_imu_hold;            /* last good reading, reused on I2C failure */
+volatile uint32_t g_ism_fail_count = 0;
+volatile uint32_t g_mag_fail_count = 0;
+volatile uint32_t g_i2c_last_err = 0;       /* hi2c1.ErrorCode of the last failure */
+
+extern I2C_HandleTypeDef hi2c1;
+
 static FATFS s_fs;
+
+static void imu_sample(REC_ImuSample *out)
+{
+    ISM330_Data_t a;
+    MMC5983_Data_t m;
+    if (ISM330_ReadSample(&a)) {
+        s_imu_hold.ax = a.ax; s_imu_hold.ay = a.ay; s_imu_hold.az = a.az;
+        s_imu_hold.gx = a.gx; s_imu_hold.gy = a.gy; s_imu_hold.gz = a.gz;
+    } else {
+        g_ism_fail_count++;
+        g_i2c_last_err = hi2c1.ErrorCode;
+    }
+    if (MMC5983_ReadSample(&m)) {
+        s_imu_hold.mx = m.mx; s_imu_hold.my = m.my; s_imu_hold.mz = m.mz;
+    } else {
+        g_mag_fail_count++;
+        g_i2c_last_err = hi2c1.ErrorCode;
+    }
+    *out = s_imu_hold;
+}
 
 /* ====================================================================
  * ISR path — the sample is read from the ADS inside the DRDY interrupt
@@ -202,6 +235,9 @@ static void blink_error(uint8_t count)
 void ACQ_Process(void)
 {
     while (s_ring_tail != s_ring_head) {
+        if (s_count % (REC_CHUNK_SAMPLES / REC_CHUNK_IMU_SAMPLES) == 0)
+            imu_sample(&s_imu[s_count / (REC_CHUNK_SAMPLES / REC_CHUNK_IMU_SAMPLES)]);
+
         s_ch1[s_count]  = s_ring_ch1[s_ring_tail];
         s_loff[s_count] = s_ring_loff[s_ring_tail];
         s_ring_tail = (uint16_t)((s_ring_tail + 1) & RING_MASK);
@@ -214,7 +250,7 @@ void ACQ_Process(void)
             g_dropped_count = 0;
             __enable_irq();
 
-            if (!REC_WriteChunk(s_ch1, s_loff, dropped))
+            if (!REC_WriteChunk(s_ch1, s_loff, s_imu, dropped))
                 blink_error(2);
 
             HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
