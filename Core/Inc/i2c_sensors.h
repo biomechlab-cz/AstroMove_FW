@@ -24,6 +24,10 @@ void    I2C_Sensors_Init(I2C_HandleTypeDef *hi2c);
 /* Returns 1 on success, 0 if sensor not responding. */
 uint8_t ISM330_ReadSample(ISM330_Data_t *out);
 
+/* ISM330DHCX die temperature in tenths of °C (e.g. 253 = 25.3 °C).
+   Returns INT16_MIN if the sensor does not respond. */
+int16_t ISM330_ReadTemperatureTenths(void);
+
 /* Trigger single measurement and read 18-bit X/Y/Z. Returns 1 on success. */
 uint8_t MMC5983_ReadSample(MMC5983_Data_t *out);
 

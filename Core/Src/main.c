@@ -130,18 +130,7 @@ int main(void)
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_11, GPIO_PIN_SET);
   HAL_Delay(500);
 
-  /* Arm PC0 (DRDY) as falling-edge EXTI. DRDY is open-drain — pull-up required. */
-  GPIO_InitTypeDef exti_cfg = {0};
-  exti_cfg.Pin  = GPIO_PIN_0;
-  exti_cfg.Mode = GPIO_MODE_IT_FALLING;
-  exti_cfg.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOC, &exti_cfg);
-  HAL_NVIC_SetPriority(EXTI0_IRQn, 1, 0);
-  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
-  MODIFY_REG(SYSCFG->EXTICR[0], SYSCFG_EXTICR1_EXTI0, SYSCFG_EXTICR1_EXTI0_PC);
-  __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_0);
-
-  /* Init SD (4-bit 480 kHz) */
+  /* Init SD (4-bit 480 kHz) and open encrypted recording session */
   if (!ACQ_Init()) {
       while (1) {
         //Blink LED
@@ -150,9 +139,6 @@ int main(void)
       }
   }
 
-  /* Write ADS register readback + RTC start time to log file header */
-  ACQ_WriteDiagnostics();
-
   /* 1-second LED flash: 10 × 100 ms — visual "ready" before sampling starts */
   for (int i = 0; i < 10; i++) {
       HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
@@ -160,8 +146,30 @@ int main(void)
   }
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
 
-  /* Enter RDATAC — ISR fires on every DRDY falling edge */
+  /* Enter RDATAC — from here on, all ADS SPI traffic happens in the ISR */
   ADS1292_StartContinuous();
+
+  /* Speed SPI up to 4 MHz for the data phase. Commands/register access
+     need the slow 500 kHz clock (ADS inter-byte decode time), but RDATAC
+     frame reads have no such limit — and the DRDY ISR must stay short
+     (~60 µs) or it starves the polled SDMMC FIFO during card writes. */
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK)
+    Error_Handler();
+
+  /* Arm PC0 (DRDY) as falling-edge EXTI. DRDY is open-drain — pull-up
+     required. Armed only after RDATAC so the ISR's SPI sample reads never
+     overlap the main-thread SPI used during init (the ISR reads the ADS
+     directly into a ring buffer — see acquisition.c). */
+  GPIO_InitTypeDef exti_cfg = {0};
+  exti_cfg.Pin  = GPIO_PIN_0;
+  exti_cfg.Mode = GPIO_MODE_IT_FALLING;
+  exti_cfg.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOC, &exti_cfg);
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 1, 0);
+  MODIFY_REG(SYSCFG->EXTICR[0], SYSCFG_EXTICR1_EXTI0, SYSCFG_EXTICR1_EXTI0_PC);
+  __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
   /* USER CODE END 2 */
 

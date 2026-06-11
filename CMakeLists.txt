@@ -48,6 +48,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/ads1292.c
     Core/Src/sd_card.c
     Core/Src/acquisition.c
+    Core/Src/recording.c
 )
 
 # Add include paths

@@ -62,6 +62,10 @@ uint8_t ADS1292_ReadSample(ADS1292_Sample_t *s);
    Call from main loop after DRDY flag is set. Includes tCSS (7.8 µs) delay after CS. */
 void ADS1292_ReadRaw(uint8_t buf[9]);
 
+/* ISR-safe fast variant of ReadRaw: direct register SPI, ~40 µs at 4 MHz.
+   Use from the DRDY interrupt — the HAL version is ~6× slower. */
+void ADS1292_ReadRawFast(uint8_t buf[9]);
+
 /* Read one register via RREG. Only valid in SDATAC mode (before StartContinuous). */
 uint8_t ADS1292_ReadReg(uint8_t reg);
 

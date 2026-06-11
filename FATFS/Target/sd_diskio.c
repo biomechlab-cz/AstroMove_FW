@@ -82,7 +82,36 @@ const Diskio_drvTypeDef  SD_Driver =
 };
 
 /* USER CODE BEGIN beforeFunctionSection */
-/* can be used to modify / undefine following code or add new code */
+/* Transient-failure recovery for SD_read/SD_write.
+ *
+ * Observed on this board: spurious DRDY/EXTI bursts starve the polling
+ * SDMMC FIFO feed → TX underrun → HAL aborts the multi-block write
+ * WITHOUT sending CMD12, leaving the card stuck in the receive state.
+ * Any further status polling then spins forever. Recovery: abort the
+ * transfer explicitly (CMD12), wait with a deadline, retry the same
+ * sectors (idempotent — the card rejected the corrupted block by CRC). */
+extern SD_HandleTypeDef hsd1;
+
+#define SD_RETRY_COUNT      3
+#define SD_READY_TIMEOUT_MS 1000
+
+/* Debug counters (read over SWD) */
+volatile uint32_t g_sd_retry_count = 0;  /* attempts that failed and were retried */
+volatile uint32_t g_sd_fail_count  = 0;  /* operations that exhausted all retries */
+volatile uint32_t g_sd_last_stage  = 0;  /* last failure: 1=BSP call failed, 2=ready-wait timed out */
+volatile uint32_t g_sd_last_err    = 0;  /* hsd1.ErrorCode captured before the abort */
+
+/* Wait until the card is back in transfer state. Returns 1 on success. */
+static int sd_wait_ready(uint32_t timeout_ms)
+{
+  uint32_t t0 = HAL_GetTick();
+  while (BSP_SD_GetCardState() != MSD_OK)
+  {
+    if (HAL_GetTick() - t0 > timeout_ms)
+      return 0;
+  }
+  return 1;
+}
 /* USER CODE END beforeFunctionSection */
 
 /* Private functions ---------------------------------------------------------*/
@@ -148,17 +177,26 @@ DRESULT SD_read(BYTE lun, BYTE *buff, DWORD sector, UINT count)
 {
   DRESULT res = RES_ERROR;
 
-  if(BSP_SD_ReadBlocks((uint32_t*)buff,
-                       (uint32_t) (sector),
-                       count, SD_TIMEOUT) == MSD_OK)
+  /* Retry transient failures — see note above sd_wait_ready() */
+  for (int attempt = 0; attempt < SD_RETRY_COUNT && res != RES_OK; attempt++)
   {
-    /* wait until the read operation is finished */
-    while(BSP_SD_GetCardState()!= MSD_OK)
+    if(BSP_SD_ReadBlocks((uint32_t*)buff,
+                         (uint32_t) (sector),
+                         count, SD_TIMEOUT) == MSD_OK
+       && sd_wait_ready(SD_READY_TIMEOUT_MS))
     {
+      res = RES_OK;
     }
-    res = RES_OK;
+    else
+    {
+      g_sd_retry_count++;
+      HAL_SD_Abort(&hsd1);
+      sd_wait_ready(SD_READY_TIMEOUT_MS);
+    }
   }
 
+  if (res != RES_OK)
+    g_sd_fail_count++;
   return res;
 }
 
@@ -179,17 +217,28 @@ DRESULT SD_write(BYTE lun, const BYTE *buff, DWORD sector, UINT count)
 {
   DRESULT res = RES_ERROR;
 
-  if(BSP_SD_WriteBlocks((uint32_t*)buff,
-                        (uint32_t)(sector),
-                        count, SD_TIMEOUT) == MSD_OK)
+  /* Retry transient failures — see note above sd_wait_ready() */
+  for (int attempt = 0; attempt < SD_RETRY_COUNT && res != RES_OK; attempt++)
   {
-	/* wait until the Write operation is finished */
-    while(BSP_SD_GetCardState() != MSD_OK)
+    uint8_t write_ok = (BSP_SD_WriteBlocks((uint32_t*)buff,
+                                           (uint32_t)(sector),
+                                           count, SD_TIMEOUT) == MSD_OK);
+    if(write_ok && sd_wait_ready(SD_READY_TIMEOUT_MS))
     {
+      res = RES_OK;
     }
-    res = RES_OK;
+    else
+    {
+      g_sd_last_stage = write_ok ? 2 : 1;
+      g_sd_last_err   = hsd1.ErrorCode;
+      g_sd_retry_count++;
+      HAL_SD_Abort(&hsd1);
+      sd_wait_ready(SD_READY_TIMEOUT_MS);
+    }
   }
 
+  if (res != RES_OK)
+    g_sd_fail_count++;
   return res;
 }
 #endif /* _USE_WRITE == 1 */

@@ -139,6 +139,31 @@ void ADS1292_ReadRaw(uint8_t buf[9])
     ADS_CS_HIGH();
 }
 
+/* Same as ReadRaw but with direct register access — ~40 µs total at 4 MHz
+   SPI instead of ~240 µs through the HAL. Used by the DRDY ISR, which must
+   stay shorter than the SDMMC FIFO refill deadline (~267 µs) or card
+   writes fail with TX underrun. Transmits NOPs (0x00) on MOSI. */
+void ADS1292_ReadRawFast(uint8_t buf[9])
+{
+    SPI_TypeDef *spi = _hspi->Instance;
+
+    ADS_CS_LOW();
+    /* tCSS ≥ 7.8 µs: ~64 iterations at 16 MHz ≈ 8 µs */
+    for (volatile uint32_t i = 0; i < 64; i++) {}
+
+    if (!(spi->CR1 & SPI_CR1_SPE))
+        spi->CR1 |= SPI_CR1_SPE;
+    while (spi->SR & SPI_SR_RXNE)              /* drain stale RX FIFO */
+        (void)*(volatile uint8_t *)&spi->DR;
+
+    for (uint32_t n = 0; n < 9; n++) {
+        *(volatile uint8_t *)&spi->DR = 0x00;  /* 8-bit access — FIFO packs 16-bit otherwise */
+        while (!(spi->SR & SPI_SR_RXNE)) {}
+        buf[n] = *(volatile uint8_t *)&spi->DR;
+    }
+    ADS_CS_HIGH();
+}
+
 void ADS1292_ReadRDATAFast(uint8_t buf[9])
 {
     uint8_t cmd = 0x12;

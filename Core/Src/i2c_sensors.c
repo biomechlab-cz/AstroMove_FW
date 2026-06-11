@@ -43,6 +43,16 @@ uint8_t ISM330_ReadSample(ISM330_Data_t *out)
     return 1;
 }
 
+int16_t ISM330_ReadTemperatureTenths(void)
+{
+    uint8_t buf[2];
+    /* OUT_TEMP_L/H (0x20/0x21): 25 °C + raw/256 per LSB */
+    if (HAL_I2C_Mem_Read(_hi2c, ISM330_ADDR, 0x20, I2C_MEMADD_SIZE_8BIT, buf, 2, 100) != HAL_OK)
+        return INT16_MIN;
+    int16_t raw = (int16_t)(buf[1] << 8 | buf[0]);
+    return (int16_t)(250 + ((int32_t)raw * 10) / 256);
+}
+
 uint8_t MMC5983_ReadSample(MMC5983_Data_t *out)
 {
     /* Trigger single measurement */
