@@ -27,7 +27,6 @@
 #include <stdio.h>
 #include "i2c_sensors.h"
 #include "ads1292.h"
-#include "sd_card.h"
 #include "acquisition.h"
 /* USER CODE END Includes */
 
@@ -130,7 +129,7 @@ int main(void)
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_11, GPIO_PIN_SET);
   HAL_Delay(500);
 
-  /* Init SD (4-bit 480 kHz) and open encrypted recording session */
+  /* Init SD (4-bit ~470 kHz) and open encrypted recording session */
   if (!ACQ_Init()) {
       while (1) {
         //Blink LED

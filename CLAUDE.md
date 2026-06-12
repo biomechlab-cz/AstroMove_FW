@@ -41,9 +41,9 @@ I2C2 permanently disabled — PB11 repurposed as TPS_ON GPIO.
 ## Data storage (EMGX format)
 - Spec: "Format specification.docx" (encrypted binary + plaintext control CSV)
 - Writer: `Core/Src/recording.c` — AES-256-GCM (hardware AES peripheral), 10 s batches of 1 s chunks, CRC32 + GCM tag per batch
-- Key: `Core/Inc/recording_key.h` — **placeholder test key**, replace before deployment
+- Key: `recording.key` (repo root, **placeholder test key** — replace before deployment); CMake generates `recording_key.h` from it at configure time, `decode_emgx.py` reads it directly
 - Files per session: `SNNNNNNN.EMX` + `SNNNNNNN.CSV` (8.3 names — FatFS `_USE_LFN=0`; enable LFN in CubeMX for the spec's `SESSION_NNNNNNN.emgx`)
-- Desktop decoder: `decode_emgx.py` (needs `pip install cryptography`); `plot_ecg.py` is for the old pre-EMGX `log_NNNN.bin` format
+- Desktop decoder: `decode_emgx.py` (needs `pip install cryptography`)
 - GCM nonce = session start time + session id + batch index — RTC must be set for cross-session uniqueness under the fixed key
 - IMU recorded at 100 Hz (payload type 2): accel+gyro int16 (ISM330, currently zeros — chip not responding) + mag 18-bit uint32 (MMC5983 continuous mode); IMU slots derived from the EMG sample clock (every 10th sample) so counts are exact; sample-and-hold across blocking writes and on I2C failure (`g_ism_fail_count`/`g_mag_fail_count`)
 - EMG = ADS ch1 int32 + lead-off status byte per sample

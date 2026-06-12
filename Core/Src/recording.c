@@ -141,7 +141,17 @@ static void put_u32(uint8_t *p, uint32_t v)
     p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
 }
 
-/* CRC32 (zlib: poly 0xEDB88320, init 0xFFFFFFFF, final XOR), nibble table */
+/* CRC32, standard zlib flavour (reflected polynomial 0xEDB88320, init
+ * 0xFFFFFFFF, final XOR with 0xFFFFFFFF) — matches Python's zlib.crc32 so
+ * the desktop decoder can verify payloads directly.
+ *
+ * Computed with a nibble (4-bit) lookup table as a size/speed compromise:
+ * the usual byte-wide table costs 1 KB of flash, bit-by-bit costs 8 loop
+ * iterations per byte. A CRC processes input lowest-bit-first; dividing
+ * 4 bits at a time means each step shifts the register right by 4 and
+ * XORs a precomputed remainder selected by the 4 bits shifted out.
+ * crc32_nibble[n] is exactly the CRC remainder of the 4-bit value n, so
+ * two table steps consume one byte. */
 static const uint32_t crc32_nibble[16] = {
     0x00000000, 0x1DB71064, 0x3B6E20C8, 0x26D930AC,
     0x76DC4190, 0x6B6B51F4, 0x4DB26158, 0x5005713C,
@@ -152,9 +162,9 @@ static const uint32_t crc32_nibble[16] = {
 static uint32_t crc32_update(uint32_t crc, const uint8_t *p, uint32_t len)
 {
     while (len--) {
-        crc ^= *p++;
-        crc = (crc >> 4) ^ crc32_nibble[crc & 0x0F];
-        crc = (crc >> 4) ^ crc32_nibble[crc & 0x0F];
+        crc ^= *p++;                                  /* fold byte into low bits */
+        crc = (crc >> 4) ^ crc32_nibble[crc & 0x0F];  /* divide low nibble */
+        crc = (crc >> 4) ^ crc32_nibble[crc & 0x0F];  /* divide high nibble */
     }
     return crc;
 }

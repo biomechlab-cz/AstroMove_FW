@@ -70,11 +70,6 @@ void ADS1292_Init(SPI_HandleTypeDef *hspi)
     HAL_Delay(10);
     ads_wreg(ADS1292_REG_RESP2, 0b00000011);  /* RESP2:    clock output enabled, RLDREF internally generated */
     HAL_Delay(10);
-
-    /* Register configuration — based on ProtoCentral V/Ohm reference setup */
-    ads_wreg(ADS1292_REG_CONFIG1, 0x03);  /* CONFIG1:  1 kSPS output data rate */
-    HAL_Delay(10);
-
 }
 
 uint8_t ADS1292_ReadID(void)

@@ -2,3 +2,8 @@ mx.scratch
 !.settings
 build
 .claude
+
+# macOS metadata
+._*
+.DS_Store
+__pycache__/

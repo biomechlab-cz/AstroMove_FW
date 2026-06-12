@@ -5,7 +5,7 @@
 #include "main.h"
 #include "fatfs.h"
 
-/* ---- SD init (validated 4-bit 480 kHz) ---- */
+/* ---- SD init (4-bit, ~470 kHz — see CLKDIV note in sd_init_4bit) ---- */
 extern SD_HandleTypeDef hsd1;
 
 static void sdmmc_gpio_very_high(void)
@@ -48,42 +48,6 @@ static uint8_t sd_init_4bit(void)
     HAL_Delay(20);
     return sd_wait_transfer(500);
 }
-
-/* ====================================================================
- * Timing calibration
- * ==================================================================== */
-// void ACQ_TimingCalibration(void)
-// {
-//     RTC_Time_t t0 = {0}, t1 = {0};
-
-//     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
-
-//     RV3028_ReadTime(&t0);
-//     uint32_t tick0 = HAL_GetTick();
-
-//     HAL_Delay(10000);
-
-//     RV3028_ReadTime(&t1);
-//     uint32_t tick1 = HAL_GetTick();
-
-//     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
-
-//     /* BCD to decimal */
-//     uint32_t s0 = (t0.hr  >> 4) * 36000 + (t0.hr  & 0x0F) * 3600
-//                 + (t0.min >> 4) *   600 + (t0.min & 0x0F) *   60
-//                 + (t0.sec >> 4) *    10 + (t0.sec & 0x0F);
-//     uint32_t s1 = (t1.hr  >> 4) * 36000 + (t1.hr  & 0x0F) * 3600
-//                 + (t1.min >> 4) *   600 + (t1.min & 0x0F) *   60
-//                 + (t1.sec >> 4) *    10 + (t1.sec & 0x0F);
-
-//     uint32_t delta_tick = tick1 - tick0;           /* ms, should be ~10000 */
-//     int32_t  delta_rtc  = (int32_t)(s1 - s0);     /* seconds per RTC */
-
-//     char buf[128];
-//     int len = snprintf(buf, sizeof(buf),
-//         "TIMING: tick=%lu ms  RTC=%ld s  diff=%ld ms\r\n",
-//         delta_tick, delta_rtc, (long)delta_tick - delta_rtc * 1000);
-// }
 
 /* ====================================================================
  * Sample buffers — one chunk (1 s of EMG), handed to the recording

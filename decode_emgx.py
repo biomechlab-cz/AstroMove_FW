@@ -12,6 +12,7 @@ Usage:
 Requires: pip install cryptography
 """
 import argparse
+import re
 import struct
 import sys
 import zlib
@@ -22,8 +23,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.exceptions import InvalidTag
 
-# Must match Core/Inc/recording_key.h
-TEST_KEY = bytes(range(32))
+# Same key file the firmware build uses (next to this script)
+KEY_FILE = Path(__file__).parent / "recording.key"
 
 FILE_HEADER_SIZE = 64
 BATCH_HEADER_SIZE = 48
@@ -35,6 +36,18 @@ IMU_STRUCT = struct.Struct("<6h3I")    # ax,ay,az,gx,gy,gz, mx,my,mz (24 B)
 # chunk size by payload type: 1 = EMG only, 2 = EMG + IMU
 CHUNK_BYTES = {1: CHUNK_EMG_BYTES,
                2: CHUNK_EMG_BYTES + IMU_SAMPLES * IMU_STRUCT.size}
+
+
+def load_key_file(path):
+    """Read 'key = <64 hex chars>' from recording.key."""
+    try:
+        text = path.read_text()
+    except OSError as e:
+        sys.exit(f"Cannot read key file {path}: {e} (or pass --key)")
+    m = re.search(r"^\s*key\s*=\s*([0-9a-fA-F]{64})\s*$", text, re.M)
+    if not m:
+        sys.exit(f"{path}: no 'key = <64 hex chars>' line found")
+    return bytes.fromhex(m.group(1))
 
 
 def bcd_timestamp(b):
@@ -165,7 +178,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("file", type=Path, help=".EMX recording file")
-    ap.add_argument("--key", help="AES-256 key as 64 hex chars (default: built-in test key)")
+    ap.add_argument("--key", help="AES-256 key as 64 hex chars "
+                                  "(default: read from recording.key next to this script)")
     ap.add_argument("-o", "--output", type=Path,
                     help="output CSV (default: <input>_data.csv)")
     ap.add_argument("--legacy-swap32", action="store_true",
@@ -173,7 +187,7 @@ def main():
                          "before 2026-06-11; word-swapped GCM, tag not verified)")
     args = ap.parse_args()
 
-    key = bytes.fromhex(args.key) if args.key else TEST_KEY
+    key = bytes.fromhex(args.key) if args.key else load_key_file(KEY_FILE)
     if len(key) != 32:
         sys.exit("Key must be 32 bytes (64 hex chars)")
 
