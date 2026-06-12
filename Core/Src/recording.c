@@ -31,7 +31,7 @@
  *
  * Batch — header (48 B, plaintext), encrypted payload, trailer (24 B):
  *   header:
- *     [0..3]   sync marker "BTCH"
+ *     [0..3]   sync marker "BATC"
  *     [4..7]   batch index (from 0)
  *     [8..13]  batch start time, RTC BCD
  *     [14]     batch duration, seconds
@@ -294,7 +294,7 @@ static uint32_t gcm_finish(uint8_t *out, uint8_t tag[16], uint32_t total_len)
 static void build_batch_header(uint8_t h[BATCH_HEADER_SIZE], uint32_t chunks)
 {
     memset(h, 0, BATCH_HEADER_SIZE);
-    memcpy(h, "BTCH", 4);
+    memcpy(h, "BATC", 4);
     put_u32(h + 4, s_batch_index);
     h[8]  = s_batch_start.sec;  h[9]  = s_batch_start.min; h[10] = s_batch_start.hr;
     h[11] = s_batch_start.date; h[12] = s_batch_start.mon; h[13] = s_batch_start.yr;

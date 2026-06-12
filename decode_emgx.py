@@ -108,9 +108,9 @@ def decode_batches(data, key, csv_out, imu_out=None, chunk_bytes=CHUNK_BYTES[1],
     n_ok = n_bad = 0
 
     while pos + BATCH_HEADER_SIZE <= len(data):
-        if data[pos:pos + 4] != b"BTCH":
+        if data[pos:pos + 4] != b"BATC":
             # fault recovery: scan forward for the next sync marker
-            nxt = data.find(b"BTCH", pos + 1)
+            nxt = data.find(b"BATC", pos + 1)
             if nxt < 0:
                 print(f"  no further sync marker after offset {pos}, stopping")
                 break
