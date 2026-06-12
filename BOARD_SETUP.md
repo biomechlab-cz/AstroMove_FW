@@ -1,4 +1,4 @@
-# AstroMowe Board Setup Procedure
+# AstroMoWe Board Setup Procedure
 
 Follow this checklist every time a **new board** is programmed for the first time.
 
@@ -38,11 +38,11 @@ Use **STM32CubeIDE** with the debug configuration included in the project:
 
 | Config | File | Use |
 |--------|------|-----|
-| Debug  | `AstroMoveCubeMX Debug.launch` | Flash + attach debugger |
-| Run    | `AstroMoveCubeMX Run.launch`   | Flash only, no debugger |
+| Debug  | `AstroMoWeCubeMX Debug.launch` | Flash + attach debugger |
+| Run    | `AstroMoWeCubeMX Run.launch`   | Flash only, no debugger |
 
 Or flash manually from CubeProgrammer: **Erasing & Programming** tab →
-select `build/Debug/AstroMoveCubeMX.elf` → **Start Programming**.
+select `build/Debug/AstroMoWeCubeMX.elf` → **Start Programming**.
 
 ---
 

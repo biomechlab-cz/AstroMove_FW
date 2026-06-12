@@ -1,4 +1,4 @@
-# AstroMowe — NewProject
+# AstroMoWe — NewProject
 
 Full hardware context: [`../HARDWARE.md`](../HARDWARE.md)
 

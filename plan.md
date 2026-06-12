@@ -1,4 +1,4 @@
-# AstroMowe Firmware Plan
+# AstroMoWe Firmware Plan
 
 ---
 

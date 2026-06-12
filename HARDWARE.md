@@ -1,4 +1,4 @@
-# AstroMowe Hardware Context
+# AstroMoWe Hardware Context
 
 MCU: **STM32L462RETx** (LQFP64)  
 System clock: **16 MHz HSI** (PLL disabled — `RCC_PLL_NONE`, `RCC_SYSCLKSOURCE_HSI`)  
