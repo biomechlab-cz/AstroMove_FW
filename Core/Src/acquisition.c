@@ -2,6 +2,7 @@
 #include "ads1292.h"
 #include "i2c_sensors.h"
 #include "recording.h"
+#include "led.h"
 #include "main.h"
 #include "fatfs.h"
 
@@ -53,8 +54,7 @@ static uint8_t sd_init_4bit(void)
  * Sample buffers — one chunk (1 s of EMG), handed to the recording
  * module which encrypts and stores them (see recording.c for the format)
  * ==================================================================== */
-static int32_t  s_ch1[REC_CHUNK_SAMPLES];   /* 24-bit ADC counts sign-extended */
-static uint8_t  s_loff[REC_CHUNK_SAMPLES];  /* raw ADS status byte 0 (lead-off in bits 6:4) */
+static int32_t  s_ch1[REC_CHUNK_SAMPLES];     /* 24-bit ADC counts sign-extended */
 static uint16_t s_count = 0;
 
 /* IMU slots — one per 10 EMG samples, so the IMU grid is derived from the
@@ -103,7 +103,6 @@ static void imu_sample(REC_ImuSample *out)
 #define RING_MASK (RING_LEN - 1)
 
 static volatile int32_t  s_ring_ch1[RING_LEN];
-static volatile uint8_t  s_ring_loff[RING_LEN];
 static volatile uint16_t s_ring_head = 0;  /* written by ISR only */
 static volatile uint16_t s_ring_tail = 0;  /* written by main loop only */
 
@@ -116,6 +115,22 @@ volatile uint32_t g_isr_count = 0;
 volatile uint32_t g_spurious_count = 0;    /* edges rejected by debounce */
 volatile uint32_t g_dropped_count = 0;     /* samples lost to a full ring */
 volatile uint32_t g_isr_max_cycles = 0;    /* worst-case ISR duration (debug) */
+
+/* Live lead-off (status LED). Asserted after LEADOFF_DEBOUNCE consecutive
+   samples with a CH1 electrode off, cleared on the first good sample.
+   g_stat0_or/g_stat1_or are sticky ORs of the status bytes for verifying
+   the lead-off bit positions on hardware over SWD. */
+#define LEADOFF_DEBOUNCE 50                /* consecutive lead-off samples (~50 ms at 1 kSPS) */
+volatile uint8_t  g_leadoff_active = 0;
+volatile uint32_t g_leadoff_count = 0;     /* CH1 lead-off samples since last chunk (→ CSV) */
+volatile uint8_t  g_stat0_or = 0;
+volatile uint8_t  g_stat1_or = 0;
+static   uint16_t s_leadoff_run = 0;
+
+/* Recoverable-warning hold for the LED (e.g. dropped samples): WARN is shown
+   for ~3 s after the event so a brief overrun is still visible. */
+static uint32_t s_warn_deadline = 0;
+static uint8_t  s_warn_on = 0;
 
 void ACQ_DRDY_Callback(void)
 {
@@ -132,15 +147,31 @@ void ACQ_DRDY_Callback(void)
     uint8_t raw[9];
     ADS1292_ReadRawFast(raw); /* direct-register read, sends NOPs on MOSI */
 
+    /* Normalized lead-off status (ADS1292_NORMALIZE_STATUS) is computed only for
+       the live LED and the per-batch lead-off count — it is NOT stored per sample.
+       Done before the ring check so a dropped sample still updates signal quality. */
+    uint8_t status = ADS1292_NORMALIZE_STATUS(raw[0], raw[1]);
+    g_stat0_or |= raw[0];   /* sticky raw ORs kept for SWD bring-up/debug */
+    g_stat1_or |= raw[1];
+
+    /* CH1 (IN1P/IN1N) carries the EMG. Count every lead-off sample for the
+       per-batch CSV summary, and debounce a sustained run for the LED. */
+    if (status & ADS1292_STATUS_CH1_LEADOFF) {
+        g_leadoff_count++;
+        if (s_leadoff_run < LEADOFF_DEBOUNCE) s_leadoff_run++;
+    } else {
+        s_leadoff_run = 0;
+    }
+    g_leadoff_active = (s_leadoff_run >= LEADOFF_DEBOUNCE);
+
     uint16_t next = (uint16_t)((s_ring_head + 1) & RING_MASK);
     if (next == s_ring_tail) {  /* ring full — main loop stalled > ~1 s */
         g_dropped_count++;
         return;
     }
-    s_ring_ch1[s_ring_head]  = ((int32_t)((uint32_t)raw[3] << 24 |
-                                          (uint32_t)raw[4] << 16 |
-                                          (uint32_t)raw[5] << 8)) >> 8;
-    s_ring_loff[s_ring_head] = raw[0];
+    s_ring_ch1[s_ring_head] = ((int32_t)((uint32_t)raw[3] << 24 |
+                                         (uint32_t)raw[4] << 16 |
+                                         (uint32_t)raw[5] << 8)) >> 8;
     s_ring_head = next;
 
     uint32_t elapsed = DWT->CYCCNT - t_entry;
@@ -157,6 +188,34 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 /* ====================================================================
  * Public API
  * ==================================================================== */
+void ACQ_SeedNonce(void)
+{
+    /* Per-session AES-GCM nonce salt from analog front-end noise (FORMAT.md §6).
+       Called after ADS1292_StartContinuous() and before the DRDY EXTI is armed:
+       the ADS is streaming in RDATAC, so the main thread can read frames with
+       ADS1292_ReadRawFast (transmits 0x00 on MOSI — mandatory, see CLAUDE.md).
+       The LSBs of ~128 conversions are mixed (FNV-1a 64-bit) with the free-
+       running CPU cycle counter and the 96-bit device UID, then installed. */
+    const uint64_t prime = 0x100000001b3ULL;
+    uint64_t h = 0xcbf29ce484222325ULL;        /* FNV-1a 64 offset basis */
+    h = (h ^ HAL_GetUIDw0()) * prime;          /* cross-device uniqueness */
+    h = (h ^ HAL_GetUIDw1()) * prime;
+    h = (h ^ HAL_GetUIDw2()) * prime;
+
+    for (int i = 0; i < 128; i++) {
+        uint8_t raw[9];
+        ADS1292_ReadRawFast(raw);
+        h = (h ^ raw[5]) * prime;              /* ch1 LSB — analog thermal noise */
+        h = (h ^ raw[8]) * prime;              /* ch2 LSB — analog thermal noise */
+        h = (h ^ DWT->CYCCNT) * prime;         /* sampling jitter */
+        HAL_Delay(1);                          /* ~one conversion period for a fresh sample */
+    }
+
+    uint8_t salt[8];
+    for (int i = 0; i < 8; i++)
+        salt[i] = (uint8_t)(h >> (8 * i));
+    REC_SetNonceSalt(salt);
+}
 uint8_t ACQ_Init(void)
 {
     /* DWT cycle counter — used by the ISR for DRDY edge debouncing */
@@ -180,30 +239,27 @@ uint8_t ACQ_Init(void)
     for (uint8_t i = 0; i < 10; i++)
         ads_regs[i] = ADS1292_ReadReg(reg_addr[i]);
 
+    /* The AES-GCM nonce salt is seeded later by ACQ_SeedNonce(), once the ADS
+       is streaming in RDATAC (see main.c). REC_Open writes a UID placeholder. */
     return REC_Open(ads_regs);
-}
-
-static void blink_error(uint8_t count)
-{
-    while (1) {
-        HAL_Delay(1000);
-        for (uint8_t i = 0; i < count; i++) {
-            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
-            HAL_Delay(80);
-            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
-            HAL_Delay(80);
-        }
-    }
 }
 
 void ACQ_Process(void)
 {
+    /* Status LED — pick the highest-priority condition currently active.
+       Fatal states latch inside the LED module; WARN outranks LEADOFF. */
+    if (s_warn_on && (int32_t)(HAL_GetTick() - s_warn_deadline) >= 0)
+        s_warn_on = 0;
+    LED_State led = LED_RECORDING;
+    if (g_leadoff_active) led = LED_LEADOFF;
+    if (s_warn_on)        led = LED_WARN;
+    LED_SetState(led);
+
     while (s_ring_tail != s_ring_head) {
         if (s_count % (REC_CHUNK_SAMPLES / REC_CHUNK_IMU_SAMPLES) == 0)
             imu_sample(&s_imu[s_count / (REC_CHUNK_SAMPLES / REC_CHUNK_IMU_SAMPLES)]);
 
-        s_ch1[s_count]  = s_ring_ch1[s_ring_tail];
-        s_loff[s_count] = s_ring_loff[s_ring_tail];
+        s_ch1[s_count] = s_ring_ch1[s_ring_tail];
         s_ring_tail = (uint16_t)((s_ring_tail + 1) & RING_MASK);
 
         if (++s_count >= REC_CHUNK_SAMPLES) {
@@ -211,13 +267,20 @@ void ACQ_Process(void)
 
             __disable_irq();
             uint32_t dropped = g_dropped_count;
+            uint32_t leadoff = g_leadoff_count;
             g_dropped_count = 0;
+            g_leadoff_count = 0;
             __enable_irq();
 
-            if (!REC_WriteChunk(s_ch1, s_loff, s_imu, dropped))
-                blink_error(2);
+            if (!REC_WriteChunk(s_ch1, s_imu, dropped, leadoff)) {
+                LED_SetState(LED_FAULT_STORAGE);  /* SysTick keeps the pattern alive */
+                while (1) { }
+            }
 
-            HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
+            if (dropped) {
+                s_warn_deadline = HAL_GetTick() + 3000;
+                s_warn_on = 1;
+            }
         }
     }
 }

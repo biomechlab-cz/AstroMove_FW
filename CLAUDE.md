@@ -36,23 +36,41 @@ I2C2 permanently disabled — PB11 repurposed as TPS_ON GPIO.
 | ISM330DHCX (IMU) | **not responding** (found 2026-06-11) | NACKs at both 0x6A and 0x6B (addr auto-probed at init); mag+RTC on same bus fine → chip dead or unpowered. Accel/gyro record as zeros |
 | MMC5983MA (mag) | working | I2C addr 0x30, board 04 only; board 05 chip dead |
 | RV-3028-C7 (RTC) | working | I2C addr 0x52; time not yet set |
-| ADS1292R (ECG ADC) | working | SPI1, ID=0x53, CPOL=0 CPHA=1, 500 kHz, 1 kSPS (CONFIG1=0x83 HR=1); DRDY non-functional on board 04 — use SDATAC+RDATA polling; EMG capture confirmed |
+| ADS1292R (ECG ADC) | working | SPI1, ID=0x53, CPOL=0 CPHA=1, 500 kHz, 1 kSPS (CONFIG1=0x83 HR=1); DRDY non-functional on board 04 — use SDATAC+RDATA polling; EMG capture confirmed; DC lead-off comparators enabled (CONFIG2 `PDB_LOFF_COMP` bit6, LOFFSENS=0x03 → CH1 IN1P/IN1N only), `ILEAD_OFF`=6 µA — tune via `ADS1292_LOFF_CONFIG` in ads1292.h (6 nA only flags a near-total open; 6 µA flags a high-Z bond but a moderate-Z bad bond can rail the signal without tripping lead-off — pair with signal-saturation detection) — feeds the status LED |
+| Status LED (PB10) | working | single-colour, active-high; driven by `Core/Src/led.c` from SysTick — see below |
+
+## Status LED indication (`Core/Src/led.c`)
+Single LED on PB10 today, written RGB-ready (set `LED_HW_RGB=1` + wire 3 pins later — colour per state already in the pattern table). Driven from `SysTick_Handler` (1 ms) so the rhythm survives blocking SD writes. State set by `main.c` (boot/ready) and `ACQ_Process()` (live signal quality / faults). Fatal states latch.
+
+| State | Rhythm (mono) | Colour (future RGB) | Trigger |
+|-------|---------------|---------------------|---------|
+| BOOT | solid | blue | init peripherals / mount SD / open session |
+| READY | 4 Hz blink (~1 s) | cyan | init OK, acquisition armed |
+| RECORDING | 50 ms wink / s | green | acquiring, electrodes good |
+| LEADOFF | 2 Hz even blink | yellow | CH1 electrode off (`g_leadoff_active`, debounced ~50 ms) |
+| WARN | double-blink / 1.5 s | amber | dropped samples (held 3 s) |
+| FAULT_STORAGE | triple-blink burst | red | unrecoverable SD/record error (latches, spins) |
+| FAULT_INIT | ~6 Hz frantic | red | SD missing / mount / session-open fail (latches) |
+
+- The ISR builds a normalized lead-off status byte via `ADS1292_NORMALIZE_STATUS` (ads1292.h); CH1 lead-off (what drives the LED) = `status & ADS1292_STATUS_CH1_LEADOFF`. Verify raw bit positions on HW via the sticky-OR debug globals `g_stat0_or`/`g_stat1_or`. IMU/mag I2C failures are **not** on the LED (ISM330 is dead on board 04 → would mask everything).
+- Verified on board 04 over SWD: RECORDING (`s_state`=2) when CH1 connected, LEADOFF (`s_state`=3) when forced, FAULT_STORAGE (`s_state`=5) rendered correctly.
 
 ## Data storage (EMGX format)
-- Spec: "Format specification.docx" (encrypted binary + plaintext control CSV)
+- **Authoritative spec: [`FORMAT.md`](FORMAT.md)** (EMGX v1: `version=1`, `payload_type=2`, normalized status byte, entropy nonce). Supersedes the higher-level "Format specification.docx". Shared with AstroMoWe_Inspect.
 - Writer: `Core/Src/recording.c` — AES-256-GCM (hardware AES peripheral), 10 s batches of 1 s chunks, CRC32 + GCM tag per batch
 - Key: `recording.key` (repo root, **placeholder test key** — replace before deployment); CMake generates `recording_key.h` from it at configure time, `decode_emgx.py` reads it directly
 - Files per session: `SNNNNNNN.EMX` + `SNNNNNNN.CSV` (8.3 names — FatFS `_USE_LFN=0`; enable LFN in CubeMX for the spec's `SESSION_NNNNNNN.emgx`)
 - Desktop decoder: `decode_emgx.py` (needs `pip install cryptography`)
-- GCM nonce = session start time + session id + batch index — RTC must be set for cross-session uniqueness under the fixed key
+- GCM nonce = 8-byte per-session salt (`nonce_scheme=1`, entropy from ADS analog noise via `ACQ_SeedNonce`) + batch index. Cross-session uniqueness no longer depends on the RTC (the old time+id scheme is `nonce_scheme=0`, now obsolete)
 - IMU recorded at 100 Hz (payload type 2): accel+gyro int16 (ISM330, currently zeros — chip not responding) + mag 18-bit uint32 (MMC5983 continuous mode); IMU slots derived from the EMG sample clock (every 10th sample) so counts are exact; sample-and-hold across blocking writes and on I2C failure (`g_ism_fail_count`/`g_mag_fail_count`)
-- EMG = ADS ch1 int32 + lead-off status byte per sample
+- EMG = ADS ch1 int32 only; per-sample lead-off status is **not** stored — the LED gives live feedback and each batch's CH1 lead-off sample count goes to the control CSV (`ch1_leadoff_samples`). Chunk = ch1[1000] + imu[100] = 6400 B; `payload_type=2` alone identifies the layout (old raw-status recordings reused 2 and simply fail to decode)
 
 ## Board 04 quirks found 2026-06-10/11
 - **BOOT0 pin reads high** — option bytes set to `nSWBOOT0=0, nBOOT0=1` (always boot main flash, BOOT0 pin ignored). Without this the MCU boots into the ROM bootloader and the firmware never runs. Re-apply after any full chip erase / option-byte reset.
 - **SDMMC TX underrun whenever the polled FIFO feed is starved** (also killed the old firmware — see 20-30 s LOG_*.BIN files). HAL aborts the write without CMD12, wedging the card in receive state. Two-layer mitigation, do not remove when regenerating from CubeMX:
   - abort (CMD12) + bounded-wait + retry ×3 in `SD_read`/`SD_write` (sd_diskio.c USER CODE) — residual underruns (~2/batch) recover on first retry
   - SDMMC CLKDIV=100 (≈470 kHz, ~235 KB/s) in `sd_init_4bit()` — at CLKDIV=50 the half-FIFO refill deadline (~70 µs worst case) is shorter than the 94 µs DRDY ISR and every multi-block write fails
+  - **Live SWD memory reads halt the core and starve the FIFO too** — polling globals with `STM32_Programmer_CLI ... -r32` during recording spiked `g_sd_retry_count` to ~1000 and forced a (recovered) underrun fault; untouched, the same firmware runs at ~2 retries/batch, 0 fails. Read sparingly, ideally between batches.
 - **DRDY edge rate ~1050/s at 1 kSPS** (~5% above spec+tolerance); ISR debounces edges <800 µs apart (DWT-based, `g_spurious_count`).
 - **ADS1292R decodes MOSI as commands even in RDATAC** — any SPI read must transmit 0x00. A read that clocks out garbage stops conversions dead (DRDY stuck low) within seconds.
 

@@ -28,6 +28,7 @@
 #include "i2c_sensors.h"
 #include "ads1292.h"
 #include "acquisition.h"
+#include "led.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -119,6 +120,10 @@ int main(void)
   MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
 
+  /* Status LED — solid while we bring up the peripherals and SD card */
+  LED_Init();
+  LED_SetState(LED_BOOT);
+
   /* Init ADS1292R over SPI */
   ADS1292_Init(&hspi1);
 
@@ -131,19 +136,13 @@ int main(void)
 
   /* Init SD (4-bit ~470 kHz) and open encrypted recording session */
   if (!ACQ_Init()) {
-      while (1) {
-        //Blink LED
-          HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
-          HAL_Delay(100);
-      }
+      LED_SetState(LED_FAULT_INIT);   /* fatal: SysTick blinks the fault pattern */
+      while (1) { }
   }
 
-  /* 1-second LED flash: 10 × 100 ms — visual "ready" before sampling starts */
-  for (int i = 0; i < 10; i++) {
-      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_10);
-      HAL_Delay(100);
-  }
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+  /* Brief "armed" indication before sampling starts */
+  LED_SetState(LED_READY);
+  HAL_Delay(1000);
 
   /* Enter RDATAC — from here on, all ADS SPI traffic happens in the ISR */
   ADS1292_StartContinuous();
@@ -155,6 +154,10 @@ int main(void)
   hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
   if (HAL_SPI_Init(&hspi1) != HAL_OK)
     Error_Handler();
+
+  /* Seed the AES-GCM nonce salt from live ADS noise — safe here because the
+     DRDY EXTI is not armed yet, so these main-thread reads can't race the ISR. */
+  ACQ_SeedNonce();
 
   /* Arm PC0 (DRDY) as falling-edge EXTI. DRDY is open-drain — pull-up
      required. Armed only after RDATAC so the ISR's SPI sample reads never
@@ -169,6 +172,10 @@ int main(void)
   MODIFY_REG(SYSCFG->EXTICR[0], SYSCFG_EXTICR1_EXTI0, SYSCFG_EXTICR1_EXTI0_PC);
   __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_0);
   HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+
+  /* Acquisition is live — switch to the recording heartbeat (ACQ_Process
+     keeps it updated with lead-off / warning conditions from here on) */
+  LED_SetState(LED_RECORDING);
 
   /* USER CODE END 2 */
 

@@ -35,18 +35,25 @@ typedef struct {
 
 /* Create session files and write the file header. SD card must already be
    mounted. ads_regs: ADS1292R registers ID,CONFIG1,CONFIG2,LOFF,CH1SET,
-   CH2SET,RLDSENS,LOFFSENS,RESP1,RESP2 (stored in the file header).
-   Returns 1 on success. */
+   CH2SET,RLDSENS,LOFFSENS,RESP1,RESP2 (stored in the file header). The nonce
+   prefix starts as a device-UID placeholder; call REC_SetNonceSalt() before the
+   first chunk to install the entropy salt. Returns 1 on success. */
 uint8_t REC_Open(const uint8_t ads_regs[10]);
 
-/* Encrypt and append one chunk. dropped_samples: samples lost since the
-   previous chunk (goes to the control CSV). Every REC_CHUNKS_PER_BATCH-th
-   chunk finalizes the batch (tag + trailer + CSV row + sync).
-   Returns 0 on unrecoverable storage failure. */
+/* Install the 8-byte per-session AES-GCM nonce prefix (entropy salt from the
+   analog front-end; see FORMAT.md §6) and rewrite it into the file header.
+   Must be called after REC_Open() and before the first REC_WriteChunk(). */
+void REC_SetNonceSalt(const uint8_t nonce_salt[8]);
+
+/* Encrypt and append one chunk (ch1 + IMU; no per-sample status is stored).
+   dropped_samples / leadoff_samples: samples lost, and CH1 lead-off samples,
+   since the previous chunk — both accumulated over the batch and reported in the
+   control CSV (FORMAT.md §8). Every REC_CHUNKS_PER_BATCH-th chunk finalizes the
+   batch (tag + trailer + CSV row + sync). Returns 0 on unrecoverable storage failure. */
 uint8_t REC_WriteChunk(const int32_t ch1[REC_CHUNK_SAMPLES],
-                       const uint8_t loff[REC_CHUNK_SAMPLES],
                        const REC_ImuSample imu[REC_CHUNK_IMU_SAMPLES],
-                       uint32_t dropped_samples);
+                       uint32_t dropped_samples,
+                       uint32_t leadoff_samples);
 
 /* Finalize an in-progress batch (marked REC_ERR_PARTIAL) and close both
    files. Safe to call when nothing is open. */

@@ -8,6 +8,11 @@
    Call before ADS1292_StartContinuous(). Returns 1 on success. */
 uint8_t ACQ_Init(void);
 
+/* Seed the AES-GCM nonce salt from analog front-end noise (FORMAT.md §6).
+   Call after ADS1292_StartContinuous() and before the DRDY EXTI is armed —
+   reads the live RDATAC stream and installs the salt via REC_SetNonceSalt(). */
+void ACQ_SeedNonce(void);
+
 /* Call from main loop. Drains the ISR sample ring; every full 1-second
    chunk is encrypted and written by the recording module. */
 void ACQ_Process(void);

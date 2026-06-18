@@ -1,60 +1,22 @@
 /* =====================================================================
- * EMGX encrypted recording — implements the "Format specification"
- * document (encrypted binary file + plaintext control CSV).
+ * EMGX encrypted recording — writer for the EMGX v1 format.
  *
- * Binary file layout (all integers little-endian unless noted):
+ * The byte layout (file header, batch header, payload type 2 chunk = ch1 + IMU,
+ * trailer), the AES-256-GCM scheme and the entropy nonce are the
+ * single-source-of-truth specification in FORMAT.md at the repo root. Keep this
+ * writer, decode_emgx.py and the AstroMoWe_Inspect Rust crate in step with it.
  *
- * File header — 64 bytes, plaintext, written once:
- *   [0..3]   magic "EMGX"
- *   [4]      format version = 1
- *   [5]      header size = 64
- *   [6]      payload type = 2 (chunk layout below; 1 = old EMG-only chunks)
- *   [7]      batch duration, seconds = 10
- *   [8..11]  session id (matches filename)
- *   [12..23] MCU 96-bit unique device ID
- *   [24..29] acquisition start time, RTC BCD: sec,min,hr,date,mon,yr
- *   [30..31] EMG sample rate, Hz = 1000
- *   [32..33] IMU sample rate, Hz = 100
- *   [34]     cipher id = 1 (AES-256-GCM)
- *   [35]     key id, [36] key version
- *   [37..39] reserved
- *   [40..47] session nonce prefix
- *   [48..57] ADS1292R registers: ID,CONFIG1,CONFIG2,LOFF,CH1SET,CH2SET,
- *            RLDSENS,LOFFSENS,RESP1,RESP2
- *   [58..63] reserved
- *
- * Payload type 2 chunk (7400 bytes, one per second):
- *   int32 ch1[1000] LE              EMG, 24-bit ADC counts sign-extended
- *   uint8 loff[1000]                ADS status byte (lead-off in bits 6:4)
- *   REC_ImuSample imu[100]          see recording.h — accel/gyro int16,
- *                                   mag uint32, 24 bytes per sample
- *
- * Batch — header (48 B, plaintext), encrypted payload, trailer (24 B):
- *   header:
- *     [0..3]   sync marker "BATC"
- *     [4..7]   batch index (from 0)
- *     [8..13]  batch start time, RTC BCD
- *     [14]     batch duration, seconds
- *     [15]     reserved
- *     [16..19] EMG sample count
- *     [20..23] IMU sample count = 0
- *     [24..27] plaintext payload bytes
- *     [28..31] ciphertext payload bytes (equal — GCM does not expand)
- *     [32..43] GCM nonce = session nonce prefix + batch index
- *     [44..47] reserved
- *   payload: one 5000-byte unit per chunk, encrypted as one GCM stream
- *   trailer:
- *     [0..3]   CRC32 (zlib) of plaintext payload
- *     [4..19]  GCM authentication tag
- *     [20..23] end marker "ENDB"
- *
- * A batch interrupted by power loss has no trailer/end marker and must be
- * discarded; all earlier batches stay decryptable. A batch closed early by
- * REC_Close() gets its header rewritten with the real counts.
- *
- * Nonce uniqueness (required by GCM under a fixed key) relies on the RTC
- * being set and on session ids not repeating: prefix = start time (BCD)
- * + low 16 bits of session id.
+ * Quick recall:
+ *   - 64 B plaintext file header, then a sequence of batches.
+ *   - Chunk (1 s) = int32 ch1[1000] + REC_ImuSample imu[100] = 6400 B. Per-sample
+ *     lead-off status is NOT stored — the LED shows it live and a per-batch CH1
+ *     lead-off count goes to the control CSV (ch1_leadoff_samples).
+ *   - Each batch = 48 B plaintext header ("BATC") + GCM ciphertext + 24 B
+ *     trailer (CRC32 of plaintext, GCM tag, "ENDB"); one GCM stream per batch.
+ *   - GCM nonce = 8 B per-session salt (entropy, FORMAT.md §6) + 4 B batch index.
+ *   - A power-loss-interrupted batch has no trailer and is discarded by readers;
+ *     earlier batches stay decryptable. An early REC_Close() rewrites the batch
+ *     header with the real counts.
  *
  * Decode on the desktop with decode_emgx.py.
  * ===================================================================== */
@@ -72,12 +34,15 @@ extern CRYP_HandleTypeDef hcryp; /* defined in main.c */
 #define BATCH_HEADER_SIZE  48
 #define BATCH_TRAILER_SIZE 24
 #define FORMAT_VERSION     1
-#define PAYLOAD_TYPE_CH1_LOFF_IMU 2
+#define PAYLOAD_TYPE_CH1_IMU 2          /* EMG int32 + IMU (no per-sample status; FORMAT.md §5) */
 #define CIPHER_AES256GCM   1
+#define NONCE_SCHEME_ENTROPY 1          /* per-session random salt + batch counter */
+#define EMG_PGA_GAIN       4            /* ADS1292R CH1 PGA gain (CH1SET=0x40) — for scaling */
+#define EMG_REF_MV         2420         /* ADC reference, mV (internal 2.42 V) — for scaling */
 #define EMG_RATE_HZ        1000
 #define IMU_RATE_HZ        100
 
-#define CHUNK_EMG_BYTES    (REC_CHUNK_SAMPLES * 5)             /* int32 + status byte per sample */
+#define CHUNK_EMG_BYTES    (REC_CHUNK_SAMPLES * 4)             /* int32 ch1 per sample (no status byte) */
 #define CHUNK_IMU_BYTES    (REC_CHUNK_IMU_SAMPLES * sizeof(REC_ImuSample))
 #define CHUNK_BYTES        (CHUNK_EMG_BYTES + CHUNK_IMU_BYTES)
 #define BATCH_EMG_SAMPLES  (REC_CHUNK_SAMPLES * REC_CHUNKS_PER_BATCH)
@@ -119,6 +84,7 @@ static uint32_t   s_chunk_count;
 static uint32_t   s_payload_bytes;   /* plaintext bytes encrypted so far */
 static uint32_t   s_crc;
 static uint32_t   s_dropped;
+static uint32_t   s_leadoff;         /* CH1 lead-off samples accumulated this batch (CSV summary) */
 static uint32_t   s_write_ms;        /* f_write + f_sync time spent on this batch */
 static uint8_t    s_error_flags;
 
@@ -349,9 +315,9 @@ static void rec_append_csv_row(void)
         snprintf(temp_str, sizeof(temp_str), "%d.%d", temp / 10,
                  (temp < 0 ? -temp : temp) % 10);
 
-    char row[160];
+    char row[176];
     int len = snprintf(row, sizeof(row),
-        "%lu,%lu,%s,%s,%lu,%lu,%lu,%lu,%lu,%08lX,%lu,%s,0x%02X,%s\r\n",
+        "%lu,%lu,%s,%s,%lu,%lu,%lu,%lu,%lu,%08lX,%lu,%s,0x%02X,%s,%lu\r\n",
         (unsigned long)s_session_id,
         (unsigned long)s_batch_index,
         ts_start, ts_end,
@@ -364,7 +330,8 @@ static void rec_append_csv_row(void)
         (unsigned long)s_dropped,
         temp_str,
         s_error_flags,
-        (s_error_flags & (REC_ERR_WRITE | REC_ERR_SYNC)) ? "ERR" : "OK");
+        (s_error_flags & (REC_ERR_WRITE | REC_ERR_SYNC)) ? "ERR" : "OK",
+        (unsigned long)s_leadoff);
 
     UINT bw;
     f_write(&s_csv, row, (UINT)len, &bw);
@@ -411,6 +378,7 @@ static uint8_t rec_end_batch(void)
     s_batch_index++;
     s_batch_open  = 0;
     s_dropped     = 0;
+    s_leadoff     = 0;
     s_write_ms    = 0;
     s_error_flags = 0;
     return fr == FR_OK;
@@ -446,17 +414,17 @@ uint8_t REC_Open(const uint8_t ads_regs[10])
     RTC_Time_t start = {0};
     RV3028_ReadTime(&start); /* stays zero if RTC does not respond */
 
-    /* Nonce prefix: start time + session id — see uniqueness note on top */
-    s_nonce_prefix[0] = start.yr;  s_nonce_prefix[1] = start.mon;
-    s_nonce_prefix[2] = start.date; s_nonce_prefix[3] = start.hr;
-    s_nonce_prefix[4] = start.min; s_nonce_prefix[5] = start.sec;
-    put_u16(s_nonce_prefix + 6, (uint16_t)s_session_id);
+    /* Nonce prefix: device-UID placeholder until REC_SetNonceSalt() installs the
+       per-session entropy salt (FORMAT.md §6). The batch index fills the low 4
+       nonce bytes per batch; no dependence on the RTC. */
+    put_u32(s_nonce_prefix + 0, HAL_GetUIDw0());
+    put_u32(s_nonce_prefix + 4, HAL_GetUIDw1());
 
     uint8_t hdr[FILE_HEADER_SIZE] = {0};
     memcpy(hdr, "EMGX", 4);
     hdr[4] = FORMAT_VERSION;
     hdr[5] = FILE_HEADER_SIZE;
-    hdr[6] = PAYLOAD_TYPE_CH1_LOFF_IMU;
+    hdr[6] = PAYLOAD_TYPE_CH1_IMU;
     hdr[7] = REC_CHUNKS_PER_BATCH;
     put_u32(hdr + 8, s_session_id);
     put_u32(hdr + 12, HAL_GetUIDw0());
@@ -469,8 +437,12 @@ uint8_t REC_Open(const uint8_t ads_regs[10])
     hdr[34] = CIPHER_AES256GCM;
     hdr[35] = REC_KEY_ID;
     hdr[36] = REC_KEY_VERSION;
+    hdr[37] = NONCE_SCHEME_ENTROPY;
+    hdr[38] = EMG_PGA_GAIN;
+    /* byte 39 reserved (0): payload_type is the sole chunk-layout discriminator */
     memcpy(hdr + 40, s_nonce_prefix, 8);
     memcpy(hdr + 48, ads_regs, 10);
+    put_u16(hdr + 58, EMG_REF_MV);
 
     UINT bw;
     FRESULT fr = f_write(&s_emgx, hdr, sizeof(hdr), &bw);
@@ -488,7 +460,8 @@ uint8_t REC_Open(const uint8_t ads_regs[10])
         "session_id,batch_index,start_timestamp,end_timestamp,"
         "emg_sample_count,imu_sample_count,unencrypted_payload_bytes,"
         "encrypted_payload_bytes,write_time_ms,crc32_plaintext,"
-        "dropped_samples,temperature_c,error_flags,storage_status\r\n";
+        "dropped_samples,temperature_c,error_flags,storage_status,"
+        "ch1_leadoff_samples\r\n";
     fr = f_write(&s_csv, csv_header, sizeof(csv_header) - 1, &bw);
     if (fr == FR_OK)
         fr = f_sync(&s_csv);
@@ -500,19 +473,37 @@ uint8_t REC_Open(const uint8_t ads_regs[10])
     s_batch_index = 0;
     s_batch_open  = 0;
     s_dropped     = 0;
+    s_leadoff     = 0;
     s_write_ms    = 0;
     s_error_flags = 0;
     s_open        = 1;
     return 1;
 }
 
+void REC_SetNonceSalt(const uint8_t nonce_salt[8])
+{
+    if (!s_open) return;
+    memcpy(s_nonce_prefix, nonce_salt, 8);
+    /* Rewrite the nonce_prefix field [40..47] of the already-written file
+       header. Safe only before the first batch, when the .EMX file is still
+       just the 64-byte header. */
+    UINT bw;
+    FSIZE_t end = f_tell(&s_emgx);
+    if (f_lseek(&s_emgx, 40) == FR_OK &&
+        f_write(&s_emgx, s_nonce_prefix, 8, &bw) == FR_OK && bw == 8) {
+        f_lseek(&s_emgx, end);
+        f_sync(&s_emgx);
+    }
+}
+
 uint8_t REC_WriteChunk(const int32_t ch1[REC_CHUNK_SAMPLES],
-                       const uint8_t loff[REC_CHUNK_SAMPLES],
                        const REC_ImuSample imu[REC_CHUNK_IMU_SAMPLES],
-                       uint32_t dropped_samples)
+                       uint32_t dropped_samples,
+                       uint32_t leadoff_samples)
 {
     if (!s_open) return 0;
     s_dropped += dropped_samples;
+    s_leadoff += leadoff_samples;
 
     if (!s_batch_open && !rec_begin_batch())
         return 0;
@@ -520,11 +511,9 @@ uint8_t REC_WriteChunk(const int32_t ch1[REC_CHUNK_SAMPLES],
     const uint8_t *ch1_bytes = (const uint8_t *)ch1; /* int32 LE on Cortex-M */
     const uint8_t *imu_bytes = (const uint8_t *)imu;
     s_crc = crc32_update(s_crc, ch1_bytes, REC_CHUNK_SAMPLES * 4);
-    s_crc = crc32_update(s_crc, loff, REC_CHUNK_SAMPLES);
     s_crc = crc32_update(s_crc, imu_bytes, CHUNK_IMU_BYTES);
 
     uint32_t n = gcm_update(ch1_bytes, REC_CHUNK_SAMPLES * 4, s_ct);
-    n += gcm_update(loff, REC_CHUNK_SAMPLES, s_ct + n);
     n += gcm_update(imu_bytes, CHUNK_IMU_BYTES, s_ct + n);
     if (!timed_write(s_ct, n, 5))
         return 0;

@@ -54,9 +54,9 @@ void ADS1292_Init(SPI_HandleTypeDef *hspi)
     /* Register configuration — based on ProtoCentral V/Ohm reference setup */
     ads_wreg(ADS1292_REG_CONFIG1, 0x03);  /* CONFIG1:  1 kSPS output data rate */
     HAL_Delay(10);
-    ads_wreg(ADS1292_REG_CONFIG2, 0b10100000);  /* CONFIG2:  internal 2.42 V reference, lead-off comp off, test signal off */
+    ads_wreg(ADS1292_REG_CONFIG2, 0b11100000);  /* CONFIG2:  lead-off comparators ON (PDB_LOFF_COMP, bit6), internal 2.42 V reference, test signal off */
     HAL_Delay(10);
-    ads_wreg(ADS1292_REG_LOFF, 0b00010000);  /* LOFF:     DC lead-off detection, threshold 5% */
+    ads_wreg(ADS1292_REG_LOFF, ADS1292_LOFF_CONFIG);  /* lead-off current/threshold — tune via ADS1292_LOFF_CONFIG in ads1292.h */
     HAL_Delay(10);
     ads_wreg(ADS1292_REG_CH1SET, 0b01000000);  /* CH1SET:   PGA gain 4, normal electrode input */
     HAL_Delay(10);
@@ -64,7 +64,7 @@ void ADS1292_Init(SPI_HandleTypeDef *hspi)
     HAL_Delay(10);
     ads_wreg(ADS1292_REG_RLDSENS, 0x00);  /* RLDSENS:  RLD channel routing off */
     HAL_Delay(10);
-    ads_wreg(ADS1292_REG_LOFFSENS, 0x0F);  /* LOFFSENS: lead-off detection on IN1P/IN1N/IN2P/IN2N */
+    ads_wreg(ADS1292_REG_LOFFSENS, 0x03);  /* LOFFSENS: lead-off detection on IN1P/IN1N (CH1 only — CH2 unused/floating) */
     HAL_Delay(10);
     ads_wreg(ADS1292_REG_RESP1, 0b11110010);  /* RESP1:    demodulator+modulator on, RLDREF internal, 32 kHz clock */
     HAL_Delay(10);

@@ -19,6 +19,19 @@
 #define SDATAC 0x11 // Stop Read Data Continuously mode
 #define RDATA 0x12  // Read data by command; supports multiple read back.
 
+/* ADS1292R RDATAC status word → normalized lead-off status byte used for the live
+   LED and the per-batch lead-off count — it is NOT stored per sample (FORMAT.md §5,
+   §8). The first two of the three status bytes carry
+   the lead-off comparator outputs (datasheet SBAS502, "Data Output"):
+     raw[0] = status[23:16] = 1100 | LOFF_STAT[4] | IN2N_OFF | IN2P_OFF | IN1N_OFF
+     raw[1] = status[15: 8] = IN1P_OFF | GPIO1 | GPIO0 | 0 0 0 0 0
+   The constant 1100 header and GPIO bits are dropped; the result is:
+     bit0 IN1P, bit1 IN1N, bit2 IN2P, bit3 IN2N, bit4 LOFF_STAT[4].
+   CH1 carries the EMG signal, so CH1 lead-off = (status & ADS1292_STATUS_CH1_LEADOFF). */
+#define ADS1292_NORMALIZE_STATUS(raw0, raw1) \
+    ((uint8_t)((((uint8_t)(raw0) & 0x0F) << 1) | (((uint8_t)(raw1) >> 7) & 0x01)))
+#define ADS1292_STATUS_CH1_LEADOFF 0x03  /* IN1P | IN1N */
+
 // register address
 #define ADS1292_REG_ID 0x00
 #define ADS1292_REG_CONFIG1 0x01
@@ -31,6 +44,32 @@
 #define ADS1292_REG_LOFFSTAT 0x08
 #define ADS1292_REG_RESP1 0x09
 #define ADS1292_REG_RESP2 0x0A
+
+/* ----- Lead-off control (LOFF register, 0x03) — adjustable for experiments -----
+   DC lead-off injects ILEAD_OFF current into the inputs and flags "lead-off" when
+   an input crosses the COMP_TH threshold. The current must develop that threshold
+   across the electrode impedance, so a high-impedance / poor contact reads as
+   "lead-on" unless the current is large enough:
+     6 nA  → flags only a near-total open (~>100 MΩ)
+     6 µA  → flags a high-impedance bond   (~>100 kΩ)   <- textile-electrode glue bond
+     22 µA → flags a marginal contact      (~>tens of kΩ)
+   Larger current costs a small DC offset on a good electrode (≈ I×R; removed by the
+   EMG high-pass). Tune ADS1292_LOFF_CONFIG below per experiment. Datasheet SBAS502
+   Table 20; bit positions: COMP_TH[7:5], (bit4=1), ILEAD_OFF[3:2], (bit1=0), FLEAD_OFF[0]. */
+#define ADS1292_LOFF_COMP_TH_95_5  (0u << 5)  /* comparator threshold pos 95% / neg 5% (default) */
+#define ADS1292_LOFF_COMP_TH_92_5  (1u << 5)  /* 92.5% / 7.5% (datasheet lists down to 70%/30%) */
+#define ADS1292_LOFF_BIT4          (1u << 4)  /* reserved — must be 1 */
+#define ADS1292_LOFF_ILEAD_6NA     (0u << 2)
+#define ADS1292_LOFF_ILEAD_22NA    (1u << 2)
+#define ADS1292_LOFF_ILEAD_6UA     (2u << 2)
+#define ADS1292_LOFF_ILEAD_22UA    (3u << 2)
+#define ADS1292_LOFF_FLEAD_DC      (0u << 0)  /* DC lead-off (default) */
+#define ADS1292_LOFF_FLEAD_AC      (1u << 0)  /* AC lead-off at f_DR/4 — no DC offset, adds a tone in-band */
+
+/* Active lead-off configuration — change the ILEAD/COMP_TH/FLEAD fields per experiment.
+   Current: 6 µA, DC, 95%/5% — chosen to flag the high-impedance textile-electrode bond. */
+#define ADS1292_LOFF_CONFIG \
+    (ADS1292_LOFF_COMP_TH_95_5 | ADS1292_LOFF_BIT4 | ADS1292_LOFF_ILEAD_6UA | ADS1292_LOFF_FLEAD_DC)
 
 typedef struct {
     uint32_t status;  /* 24-bit status word — header bits [23:20] must be 0xC */
