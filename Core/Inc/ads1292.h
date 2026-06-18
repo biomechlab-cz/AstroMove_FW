@@ -67,9 +67,11 @@
 #define ADS1292_LOFF_FLEAD_AC      (1u << 0)  /* AC lead-off at f_DR/4 — no DC offset, adds a tone in-band */
 
 /* Active lead-off configuration — change the ILEAD/COMP_TH/FLEAD fields per experiment.
-   Current: 6 µA, DC, 95%/5% — chosen to flag the high-impedance textile-electrode bond. */
+   Current: 6 nA, DC, 95%/5% — recording-safe (too small to rail a poor contact, so the
+   real EMG is preserved). 6 µA flags a high-impedance bond but rails it, swamping the
+   EMG — only use 6 µA as a contact check or once the electrode bond is reliably low-Z. */
 #define ADS1292_LOFF_CONFIG \
-    (ADS1292_LOFF_COMP_TH_95_5 | ADS1292_LOFF_BIT4 | ADS1292_LOFF_ILEAD_6UA | ADS1292_LOFF_FLEAD_DC)
+    (ADS1292_LOFF_COMP_TH_95_5 | ADS1292_LOFF_BIT4 | ADS1292_LOFF_ILEAD_6NA | ADS1292_LOFF_FLEAD_DC)
 
 typedef struct {
     uint32_t status;  /* 24-bit status word — header bits [23:20] must be 0xC */

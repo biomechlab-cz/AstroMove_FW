@@ -159,7 +159,8 @@ Header row, then one row per completed batch:
 session_id,batch_index,start_timestamp,end_timestamp,emg_sample_count,
 imu_sample_count,unencrypted_payload_bytes,encrypted_payload_bytes,write_time_ms,
 crc32_plaintext,dropped_samples,temperature_c,error_flags,storage_status,
-ch1_leadoff_samples
+ch1_leadoff_samples,ch1_saturated_samples,ch1_quality_flags,
+ch1_flatline_chunks,ch1_baseline_drift_chunks
 ```
 
 - Timestamps are BCD `YYMMDDhhmmss` (session-relative; see RTC note in §6).
@@ -169,6 +170,18 @@ ch1_leadoff_samples
 - `ch1_leadoff_samples`: count of CH1 (IN1P/IN1N) lead-off samples in the batch —
   the per-batch summary that replaces the dropped per-sample status byte. `0` means
   the electrodes were attached for the whole batch.
+- `ch1_saturated_samples`: count of CH1 samples railed to within 8 LSB of ±full-scale.
+  Catches a bad/high-impedance contact that saturates the input without tripping
+  lead-off (the LED also lights for this). `0` is normal.
+- `ch1_quality_flags`: hex bit field OR-ed across the batch: `0x01` FLATLINE,
+  `0x02` BASELINE_DRIFT. These are real-time chunk quality checks; they do not
+  change the encrypted payload layout.
+- `ch1_flatline_chunks`: count of 1-second chunks where CH1 was stuck, nearly
+  flat, or repeated the same ADC code for almost the whole chunk. This is treated
+  as hard bad contact / unusable signal and uses the lead-off LED pattern.
+- `ch1_baseline_drift_chunks`: count of 1-second chunks where the mean of the
+  last 100 samples moved by at least 100000 ADC counts from the first 100 samples.
+  This is treated as a noisy/motion-artifact warning.
 
 ## 9. Physical scaling (for analysis / ML)
 

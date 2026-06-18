@@ -10,7 +10,7 @@
  *   - 64 B plaintext file header, then a sequence of batches.
  *   - Chunk (1 s) = int32 ch1[1000] + REC_ImuSample imu[100] = 6400 B. Per-sample
  *     lead-off status is NOT stored — the LED shows it live and a per-batch CH1
- *     lead-off count goes to the control CSV (ch1_leadoff_samples).
+ *     lead-off and signal-quality summaries go to the control CSV.
  *   - Each batch = 48 B plaintext header ("BATC") + GCM ciphertext + 24 B
  *     trailer (CRC32 of plaintext, GCM tag, "ENDB"); one GCM stream per batch.
  *   - GCM nonce = 8 B per-session salt (entropy, FORMAT.md §6) + 4 B batch index.
@@ -85,6 +85,10 @@ static uint32_t   s_payload_bytes;   /* plaintext bytes encrypted so far */
 static uint32_t   s_crc;
 static uint32_t   s_dropped;
 static uint32_t   s_leadoff;         /* CH1 lead-off samples accumulated this batch (CSV summary) */
+static uint32_t   s_saturated;       /* CH1 near-full-scale (railed) samples this batch (CSV summary) */
+static uint32_t   s_signal_quality;  /* OR of REC_SIGQ_* flags observed in this batch */
+static uint32_t   s_flatline_chunks;
+static uint32_t   s_baseline_drift_chunks;
 static uint32_t   s_write_ms;        /* f_write + f_sync time spent on this batch */
 static uint8_t    s_error_flags;
 
@@ -315,9 +319,9 @@ static void rec_append_csv_row(void)
         snprintf(temp_str, sizeof(temp_str), "%d.%d", temp / 10,
                  (temp < 0 ? -temp : temp) % 10);
 
-    char row[176];
+    char row[256];
     int len = snprintf(row, sizeof(row),
-        "%lu,%lu,%s,%s,%lu,%lu,%lu,%lu,%lu,%08lX,%lu,%s,0x%02X,%s,%lu\r\n",
+        "%lu,%lu,%s,%s,%lu,%lu,%lu,%lu,%lu,%08lX,%lu,%s,0x%02X,%s,%lu,%lu,0x%02lX,%lu,%lu\r\n",
         (unsigned long)s_session_id,
         (unsigned long)s_batch_index,
         ts_start, ts_end,
@@ -331,7 +335,11 @@ static void rec_append_csv_row(void)
         temp_str,
         s_error_flags,
         (s_error_flags & (REC_ERR_WRITE | REC_ERR_SYNC)) ? "ERR" : "OK",
-        (unsigned long)s_leadoff);
+        (unsigned long)s_leadoff,
+        (unsigned long)s_saturated,
+        (unsigned long)s_signal_quality,
+        (unsigned long)s_flatline_chunks,
+        (unsigned long)s_baseline_drift_chunks);
 
     UINT bw;
     f_write(&s_csv, row, (UINT)len, &bw);
@@ -379,6 +387,10 @@ static uint8_t rec_end_batch(void)
     s_batch_open  = 0;
     s_dropped     = 0;
     s_leadoff     = 0;
+    s_saturated   = 0;
+    s_signal_quality = 0;
+    s_flatline_chunks = 0;
+    s_baseline_drift_chunks = 0;
     s_write_ms    = 0;
     s_error_flags = 0;
     return fr == FR_OK;
@@ -461,7 +473,8 @@ uint8_t REC_Open(const uint8_t ads_regs[10])
         "emg_sample_count,imu_sample_count,unencrypted_payload_bytes,"
         "encrypted_payload_bytes,write_time_ms,crc32_plaintext,"
         "dropped_samples,temperature_c,error_flags,storage_status,"
-        "ch1_leadoff_samples\r\n";
+        "ch1_leadoff_samples,ch1_saturated_samples,ch1_quality_flags,"
+        "ch1_flatline_chunks,ch1_baseline_drift_chunks\r\n";
     fr = f_write(&s_csv, csv_header, sizeof(csv_header) - 1, &bw);
     if (fr == FR_OK)
         fr = f_sync(&s_csv);
@@ -474,6 +487,10 @@ uint8_t REC_Open(const uint8_t ads_regs[10])
     s_batch_open  = 0;
     s_dropped     = 0;
     s_leadoff     = 0;
+    s_saturated   = 0;
+    s_signal_quality = 0;
+    s_flatline_chunks = 0;
+    s_baseline_drift_chunks = 0;
     s_write_ms    = 0;
     s_error_flags = 0;
     s_open        = 1;
@@ -499,11 +516,19 @@ void REC_SetNonceSalt(const uint8_t nonce_salt[8])
 uint8_t REC_WriteChunk(const int32_t ch1[REC_CHUNK_SAMPLES],
                        const REC_ImuSample imu[REC_CHUNK_IMU_SAMPLES],
                        uint32_t dropped_samples,
-                       uint32_t leadoff_samples)
+                       uint32_t leadoff_samples,
+                       uint32_t saturated_samples,
+                       uint32_t signal_quality_flags,
+                       uint32_t flatline_chunks,
+                       uint32_t baseline_drift_chunks)
 {
     if (!s_open) return 0;
     s_dropped += dropped_samples;
     s_leadoff += leadoff_samples;
+    s_saturated += saturated_samples;
+    s_signal_quality |= signal_quality_flags;
+    s_flatline_chunks += flatline_chunks;
+    s_baseline_drift_chunks += baseline_drift_chunks;
 
     if (!s_batch_open && !rec_begin_batch())
         return 0;

@@ -24,7 +24,7 @@
  *   READY            4 Hz blink (~1 s)            cyan      init OK, acquisition armed
  *   RECORDING        50 ms wink every 1 s         green     running, signal good
  *   LEADOFF          2 Hz even blink              yellow    electrode off / bad signal
- *   WARN             double-blink every 1.5 s     amber     samples dropped (logged)
+ *   WARN             double-blink every 1.5 s     amber     recoverable/noisy signal issue
  *   FAULT_STORAGE    triple-blink burst           red       SD / write failure (fatal)
  *   FAULT_INIT       ~6 Hz frantic blink          red       no card / mount failed (fatal)
  * ------------------------------------------------------------------------- */
@@ -38,7 +38,7 @@ typedef enum {
     LED_READY,           /* init OK, acquisition armed (brief) */
     LED_RECORDING,       /* acquiring, electrodes good — calm heartbeat */
     LED_LEADOFF,         /* acquiring, electrode(s) off / bad signal */
-    LED_WARN,            /* acquiring, recoverable issue logged (e.g. dropped samples) */
+    LED_WARN,            /* acquiring, recoverable/noisy issue logged */
     LED_FAULT_STORAGE,   /* unrecoverable SD / recording error (fatal) */
     LED_FAULT_INIT,      /* init failed: no card, mount or session-open failure (fatal) */
     LED_STATE_COUNT

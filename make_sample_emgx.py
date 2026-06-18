@@ -149,13 +149,14 @@ def main():
         end_b = bcd_str(bcd_time(b * 10 + 10))
         rows.append(f"{args.session},{b},{start_b},{end_b},{10*fmt.CHUNK_SAMPLES},"
                     f"{10*fmt.IMU_SAMPLES},{len(payload)},{len(ct)},0,{crc:08X},0,25.3,0x00,OK,"
-                    f"{leadoff_n}")
+                    f"{leadoff_n},0,0x00,0,0")  # synthetic never rails or trips quality checks
 
     emx.write_bytes(out)
     csv_header = ("session_id,batch_index,start_timestamp,end_timestamp,emg_sample_count,"
                   "imu_sample_count,unencrypted_payload_bytes,encrypted_payload_bytes,"
                   "write_time_ms,crc32_plaintext,dropped_samples,temperature_c,"
-                  "error_flags,storage_status,ch1_leadoff_samples")
+                  "error_flags,storage_status,ch1_leadoff_samples,ch1_saturated_samples,"
+                  "ch1_quality_flags,ch1_flatline_chunks,ch1_baseline_drift_chunks")
     csv.write_text(csv_header + "\n" + "\n".join(rows) + "\n")
     print(f"{emx.name}: {args.batches} batches, {args.batches*10*fmt.CHUNK_SAMPLES} EMG / "
           f"{args.batches*10*fmt.IMU_SAMPLES} IMU samples, {len(out)} bytes  (+ {csv.name})")

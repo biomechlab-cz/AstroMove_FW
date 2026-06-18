@@ -127,10 +127,102 @@ volatile uint8_t  g_stat0_or = 0;
 volatile uint8_t  g_stat1_or = 0;
 static   uint16_t s_leadoff_run = 0;
 
+/* Live signal-saturation: a railed input flags a bad/high-impedance contact that
+   lead-off can miss (the PGA saturates differentially before the lead-off
+   comparator's absolute threshold trips — observed with the textile-electrode
+   bond). Counted and debounced like lead-off; also lights the lead-off LED. */
+#define SAT_THRESHOLD ((1 << 23) - 8)      /* |ch1| within 8 LSB of ±full-scale */
+#define SAT_DEBOUNCE  50                   /* consecutive saturated samples (~50 ms) */
+volatile uint8_t  g_saturated_active = 0;
+volatile uint32_t g_saturated_count = 0;   /* CH1 saturated samples since last chunk (→ CSV) */
+static   uint16_t s_sat_run = 0;
+
 /* Recoverable-warning hold for the LED (e.g. dropped samples): WARN is shown
    for ~3 s after the event so a brief overrun is still visible. */
+#define QUALITY_HOLD_MS 3000U
 static uint32_t s_warn_deadline = 0;
 static uint8_t  s_warn_on = 0;
+static uint32_t s_bad_signal_deadline = 0;
+static uint8_t  s_bad_signal_on = 0;
+
+/* Chunk-level signal quality checks. These intentionally run outside the ISR
+   and use conservative thresholds: flag clearly unusable signal first, then
+   tune from CSVs recorded on real subjects/electrodes. */
+#define QUALITY_FLATLINE_P2P_COUNTS          32
+#define QUALITY_FLATLINE_DIFF_SUM_COUNTS     128
+#define QUALITY_FLATLINE_REPEAT_RUN          950
+#define QUALITY_BASELINE_EDGE_SAMPLES        100
+#define QUALITY_BASELINE_DRIFT_COUNTS        100000
+
+typedef struct {
+    uint32_t flags;
+    uint32_t flatline_chunks;
+    uint32_t baseline_drift_chunks;
+    uint8_t  bad_contact;
+    uint8_t  noisy;
+} ACQ_SignalQuality;
+
+static int64_t abs_i64(int64_t v)
+{
+    return (v < 0) ? -v : v;
+}
+
+static ACQ_SignalQuality analyze_signal_quality(const int32_t ch1[REC_CHUNK_SAMPLES])
+{
+    ACQ_SignalQuality q = {0};
+    int32_t min_v = ch1[0];
+    int32_t max_v = ch1[0];
+    int32_t prev = ch1[0];
+    uint16_t repeat_run = 1;
+    uint16_t max_repeat_run = 1;
+    int64_t diff_abs_sum = 0;
+    int64_t first_edge_sum = 0;
+    int64_t last_edge_sum = 0;
+
+    for (uint16_t i = 0; i < REC_CHUNK_SAMPLES; i++) {
+        int32_t x = ch1[i];
+        if (x < min_v) min_v = x;
+        if (x > max_v) max_v = x;
+
+        if (i < QUALITY_BASELINE_EDGE_SAMPLES)
+            first_edge_sum += x;
+        if (i >= (REC_CHUNK_SAMPLES - QUALITY_BASELINE_EDGE_SAMPLES))
+            last_edge_sum += x;
+
+        if (i > 0) {
+            diff_abs_sum += abs_i64((int64_t)x - prev);
+            if (x == prev) {
+                if (repeat_run < REC_CHUNK_SAMPLES)
+                    repeat_run++;
+            } else {
+                repeat_run = 1;
+            }
+            if (repeat_run > max_repeat_run)
+                max_repeat_run = repeat_run;
+            prev = x;
+        }
+    }
+
+    int64_t peak_to_peak = (int64_t)max_v - min_v;
+    if (peak_to_peak <= QUALITY_FLATLINE_P2P_COUNTS ||
+        diff_abs_sum <= QUALITY_FLATLINE_DIFF_SUM_COUNTS ||
+        max_repeat_run >= QUALITY_FLATLINE_REPEAT_RUN) {
+        q.flags |= REC_SIGQ_FLATLINE;
+        q.flatline_chunks = 1;
+        q.bad_contact = 1;
+    }
+
+    int64_t baseline_delta =
+        (last_edge_sum - first_edge_sum) / QUALITY_BASELINE_EDGE_SAMPLES;
+    if (!(q.flags & REC_SIGQ_FLATLINE) &&
+        abs_i64(baseline_delta) >= QUALITY_BASELINE_DRIFT_COUNTS) {
+        q.flags |= REC_SIGQ_BASELINE_DRIFT;
+        q.baseline_drift_chunks = 1;
+        q.noisy = 1;
+    }
+
+    return q;
+}
 
 void ACQ_DRDY_Callback(void)
 {
@@ -164,14 +256,24 @@ void ACQ_DRDY_Callback(void)
     }
     g_leadoff_active = (s_leadoff_run >= LEADOFF_DEBOUNCE);
 
+    /* CH1 sample (24-bit sign-extended), reused for the saturation check below. */
+    int32_t ch1 = ((int32_t)((uint32_t)raw[3] << 24 |
+                             (uint32_t)raw[4] << 16 |
+                             (uint32_t)raw[5] << 8)) >> 8;
+    if (ch1 >= SAT_THRESHOLD || ch1 <= -SAT_THRESHOLD) {
+        g_saturated_count++;
+        if (s_sat_run < SAT_DEBOUNCE) s_sat_run++;
+    } else {
+        s_sat_run = 0;
+    }
+    g_saturated_active = (s_sat_run >= SAT_DEBOUNCE);
+
     uint16_t next = (uint16_t)((s_ring_head + 1) & RING_MASK);
     if (next == s_ring_tail) {  /* ring full — main loop stalled > ~1 s */
         g_dropped_count++;
         return;
     }
-    s_ring_ch1[s_ring_head] = ((int32_t)((uint32_t)raw[3] << 24 |
-                                         (uint32_t)raw[4] << 16 |
-                                         (uint32_t)raw[5] << 8)) >> 8;
+    s_ring_ch1[s_ring_head] = ch1;
     s_ring_head = next;
 
     uint32_t elapsed = DWT->CYCCNT - t_entry;
@@ -248,10 +350,14 @@ void ACQ_Process(void)
 {
     /* Status LED — pick the highest-priority condition currently active.
        Fatal states latch inside the LED module; WARN outranks LEADOFF. */
-    if (s_warn_on && (int32_t)(HAL_GetTick() - s_warn_deadline) >= 0)
+    uint32_t tick = HAL_GetTick();
+    if (s_warn_on && (int32_t)(tick - s_warn_deadline) >= 0)
         s_warn_on = 0;
+    if (s_bad_signal_on && (int32_t)(tick - s_bad_signal_deadline) >= 0)
+        s_bad_signal_on = 0;
     LED_State led = LED_RECORDING;
-    if (g_leadoff_active) led = LED_LEADOFF;
+    if (g_leadoff_active || g_saturated_active || s_bad_signal_on)
+        led = LED_LEADOFF;  /* hard bad contact / unusable signal */
     if (s_warn_on)        led = LED_WARN;
     LED_SetState(led);
 
@@ -268,17 +374,29 @@ void ACQ_Process(void)
             __disable_irq();
             uint32_t dropped = g_dropped_count;
             uint32_t leadoff = g_leadoff_count;
+            uint32_t saturated = g_saturated_count;
             g_dropped_count = 0;
             g_leadoff_count = 0;
+            g_saturated_count = 0;
             __enable_irq();
 
-            if (!REC_WriteChunk(s_ch1, s_imu, dropped, leadoff)) {
+            ACQ_SignalQuality quality = analyze_signal_quality(s_ch1);
+
+            if (!REC_WriteChunk(s_ch1, s_imu, dropped, leadoff, saturated,
+                                quality.flags,
+                                quality.flatline_chunks,
+                                quality.baseline_drift_chunks)) {
                 LED_SetState(LED_FAULT_STORAGE);  /* SysTick keeps the pattern alive */
                 while (1) { }
             }
 
-            if (dropped) {
-                s_warn_deadline = HAL_GetTick() + 3000;
+            tick = HAL_GetTick();
+            if (quality.bad_contact) {
+                s_bad_signal_deadline = tick + QUALITY_HOLD_MS;
+                s_bad_signal_on = 1;
+            }
+            if (dropped || quality.noisy) {
+                s_warn_deadline = tick + QUALITY_HOLD_MS;
                 s_warn_on = 1;
             }
         }

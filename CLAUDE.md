@@ -33,7 +33,7 @@ I2C2 permanently disabled — PB11 repurposed as TPS_ON GPIO.
 |---------|--------|-------|
 | USART1 Hello World | in progress | 115200 8N1, ST-Link V3 MINI virtual COM |
 | SDMMC1 + FatFS write | working | 1-bit mode, ClockDiv=10, GPIO_PULLUP/MEDIUM; D1-D3 bad solder on board 05 |
-| ISM330DHCX (IMU) | **not responding** (found 2026-06-11) | NACKs at both 0x6A and 0x6B (addr auto-probed at init); mag+RTC on same bus fine → chip dead or unpowered. Accel/gyro record as zeros |
+| ISM330DHCX (IMU) | **not responding** (found 2026-06-11) | NACKs at both 0x6A and 0x6B (addr auto-probed at init); mag+RTC on same bus fine → chip dead or unpowered. Accel/gyro record as zeros. Lowering I2C to ~10 kHz with pull-ups did **not** help (still address-NACK, `g_i2c_last_err`=AF, while mag works on the same bus) → confirmed chip-level, not bus signal integrity; check IMU power/SA0/solder |
 | MMC5983MA (mag) | working | I2C addr 0x30, board 04 only; board 05 chip dead |
 | RV-3028-C7 (RTC) | working | I2C addr 0x52; time not yet set |
 | ADS1292R (ECG ADC) | working | SPI1, ID=0x53, CPOL=0 CPHA=1, 500 kHz, 1 kSPS (CONFIG1=0x83 HR=1); DRDY non-functional on board 04 — use SDATAC+RDATA polling; EMG capture confirmed; DC lead-off comparators enabled (CONFIG2 `PDB_LOFF_COMP` bit6, LOFFSENS=0x03 → CH1 IN1P/IN1N only), `ILEAD_OFF`=6 µA — tune via `ADS1292_LOFF_CONFIG` in ads1292.h (6 nA only flags a near-total open; 6 µA flags a high-Z bond but a moderate-Z bad bond can rail the signal without tripping lead-off — pair with signal-saturation detection) — feeds the status LED |
@@ -54,6 +54,10 @@ Single LED on PB10 today, written RGB-ready (set `LED_HW_RGB=1` + wire 3 pins la
 
 - The ISR builds a normalized lead-off status byte via `ADS1292_NORMALIZE_STATUS` (ads1292.h); CH1 lead-off (what drives the LED) = `status & ADS1292_STATUS_CH1_LEADOFF`. Verify raw bit positions on HW via the sticky-OR debug globals `g_stat0_or`/`g_stat1_or`. IMU/mag I2C failures are **not** on the LED (ISM330 is dead on board 04 → would mask everything).
 - Verified on board 04 over SWD: RECORDING (`s_state`=2) when CH1 connected, LEADOFF (`s_state`=3) when forced, FAULT_STORAGE (`s_state`=5) rendered correctly.
+
+## I2C1 bus
+- PA9=SCL and PA10=SDA are configured open-drain with pull-ups enabled (`GPIO_PULLUP` in `Core/Src/stm32l4xx_hal_msp.c` and the CubeMX `.ioc`). Use/keep board-level external pull-up resistors for reliable operation; the MCU pull-ups are only a firmware-side fallback.
+- I2C1 uses PCLK1=16 MHz and timing `0x00503D58` (`I2C1_TIMING_100KHZ_16MHZ`) for standard-mode, about 100 kHz. Do not raise this toward fast-mode unless the board pull-ups and all sensors are revalidated.
 
 ## Data storage (EMGX format)
 - **Authoritative spec: [`FORMAT.md`](FORMAT.md)** (EMGX v1: `version=1`, `payload_type=2`, normalized status byte, entropy nonce). Supersedes the higher-level "Format specification.docx". Shared with AstroMoWe_Inspect.
