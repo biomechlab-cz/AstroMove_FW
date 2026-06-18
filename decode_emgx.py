@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
-"""Decode an encrypted EMGX recording (format v1, see recording.c).
+"""Decode an encrypted EMGX recording (format v1 â€” see FORMAT.md).
 
-Decrypts each batch with AES-256-GCM, verifies the authentication tag and
-the plaintext CRC32, and exports samples to CSV: EMG to <input>_data.csv
-and, for payload type 2 recordings, IMU to <input>_imu.csv.
+Decrypts each batch with AES-256-GCM, verifies the authentication tag and the
+plaintext CRC32, and exports samples to CSV: EMG to <input>_data.csv and IMU to
+<input>_imu.csv.
+
+EMG CSV columns:  sample_index, batch_index, ch1
+  - ch1          raw 24-bit ADC counts, sign-extended (see FORMAT.md Â§9 for ÂµV)
+IMU CSV columns:  imu_index, batch_index, ax, ay, az, gx, gy, gz, mx, my, mz
+
+Per-sample lead-off status is not stored; the control CSV's per-batch
+ch1_leadoff_samples column carries the lead-off summary instead.
+
+Older development recordings are an obsolete, incompatible format: the early
+raw-status recordings reused payload type 2 and fail to decode (their chunk size
+differs), and the pre-BATC files have no batch markers.
 
 Usage:
     python decode_emgx.py S0000001.EMX
@@ -12,7 +23,6 @@ Usage:
 Requires: pip install cryptography
 """
 import argparse
-import re
 import struct
 import sys
 import zlib
@@ -20,26 +30,29 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.exceptions import InvalidTag
 
 # Same key file the firmware build uses (next to this script)
 KEY_FILE = Path(__file__).parent / "recording.key"
 
+FORMAT_VERSION = 1
+PAYLOAD_TYPE = 2               # EMG int32 + IMU (no per-sample status)
+CIPHER_AES256GCM = 1
+
 FILE_HEADER_SIZE = 64
 BATCH_HEADER_SIZE = 48
 TRAILER_SIZE = 24
 CHUNK_SAMPLES = 1000           # EMG samples per 1 s chunk
-CHUNK_EMG_BYTES = CHUNK_SAMPLES * 5    # int32 ch1 + uint8 loff per sample
-IMU_SAMPLES = 100              # IMU samples per chunk (payload type 2)
+CHUNK_EMG_BYTES = CHUNK_SAMPLES * 4    # int32 ch1 per sample (no status byte)
+IMU_SAMPLES = 100              # IMU samples per chunk
 IMU_STRUCT = struct.Struct("<6h3I")    # ax,ay,az,gx,gy,gz, mx,my,mz (24 B)
-# chunk size by payload type: 1 = EMG only, 2 = EMG + IMU
-CHUNK_BYTES = {1: CHUNK_EMG_BYTES,
-               2: CHUNK_EMG_BYTES + IMU_SAMPLES * IMU_STRUCT.size}
+CHUNK_BYTES = CHUNK_EMG_BYTES + IMU_SAMPLES * IMU_STRUCT.size  # 6400
+OBSOLETE_CHUNK_BYTES = CHUNK_EMG_BYTES + CHUNK_SAMPLES + IMU_SAMPLES * IMU_STRUCT.size  # 7400
 
 
 def load_key_file(path):
     """Read 'key = <64 hex chars>' from recording.key."""
+    import re
     try:
         text = path.read_text()
     except OSError as e:
@@ -59,8 +72,12 @@ def bcd_timestamp(b):
 def parse_file_header(h):
     if h[0:4] != b"EMGX":
         sys.exit("Not an EMGX file (bad magic)")
+    version = h[4]
+    if version != FORMAT_VERSION:
+        sys.exit(f"Incompatible/obsolete EMGX format version {version} "
+                 f"(this decoder reads v{FORMAT_VERSION} only; see FORMAT.md)")
     info = {
-        "version": h[4],
+        "version": version,
         "header_size": h[5],
         "payload_type": h[6],
         "batch_duration_s": h[7],
@@ -72,35 +89,34 @@ def parse_file_header(h):
         "cipher_id": h[34],
         "key_id": h[35],
         "key_version": h[36],
+        "nonce_scheme": h[37],
+        "emg_pga_gain": h[38],
         "nonce_prefix": h[40:48].hex(),
         "ads_regs": h[48:58].hex(),
+        "emg_ref_mv": struct.unpack_from("<H", h, 58)[0],
     }
-    if info["version"] != 1:
-        sys.exit(f"Unsupported format version {info['version']}")
-    if info["cipher_id"] != 1:
+    if info["cipher_id"] != CIPHER_AES256GCM:
         sys.exit(f"Unsupported cipher id {info['cipher_id']} (expected 1 = AES-256-GCM)")
-    if info["payload_type"] not in CHUNK_BYTES:
-        sys.exit(f"Unsupported payload type {info['payload_type']}")
+    if info["payload_type"] != PAYLOAD_TYPE:
+        sys.exit(f"Unsupported payload type {info['payload_type']} (expected {PAYLOAD_TYPE} "
+                 f"= EMG ch1 + IMU; obsolete raw-status recordings reused payload type 2 "
+                 f"and will not decode â€” see FORMAT.md)")
     return info
 
 
-def swap32(b):
-    """Reverse byte order within each 32-bit word."""
-    return b"".join(b[i:i + 4][::-1] for i in range(0, len(b), 4))
+def emg_uv(counts, ref_mv, gain):
+    """Convert raw ch1 counts to microvolts (FORMAT.md Â§9)."""
+    if not gain:
+        return None
+    return counts * ref_mv * 1000.0 / ((1 << 23) * gain)
 
 
-def legacy_decrypt(key, nonce, ct):
-    """Recordings made before the firmware's DataType fix (sessions 0-4)
-    were encrypted with the AES peripheral in no-swap mode: a word-swapped
-    GCM stream. Decrypt via CTR with swapped words; the GCM tag of those
-    files is non-standard and is NOT verified — CRC32 still is."""
-    ctr0 = nonce + (2).to_bytes(4, "big")  # GCM payload counter starts at 2
-    dec = Cipher(algorithms.AES(key), modes.CTR(ctr0)).decryptor()
-    return swap32(dec.update(swap32(ct)) + dec.finalize())
+def ensure_batch_markers(data):
+    if len(data) > FILE_HEADER_SIZE and data.find(b"BATC", FILE_HEADER_SIZE) < 0:
+        sys.exit("Obsolete/incompatible pre-BATC recording: no BATC batch markers found")
 
 
-def decode_batches(data, key, csv_out, imu_out=None, chunk_bytes=CHUNK_BYTES[1],
-                   legacy=False):
+def decode_batches(data, key, csv_out, imu_out):
     aes = AESGCM(key)
     pos = FILE_HEADER_SIZE
     sample_index = 0
@@ -137,36 +153,41 @@ def decode_batches(data, key, csv_out, imu_out=None, chunk_bytes=CHUNK_BYTES[1],
             pos += 4  # step past this marker and resync
             continue
 
-        status = []
-        if legacy:
-            pt = legacy_decrypt(key, nonce, ct)
-            status.append("legacy: tag not verified")
-        else:
-            try:
-                pt = aes.decrypt(nonce, ct + tag, None)
-            except InvalidTag:
-                print(f"  batch {batch_index}: AUTH TAG FAILED (wrong key or tampered), discarded")
-                n_bad += 1
-                pos = end
-                continue
+        status_notes = []
+        try:
+            pt = aes.decrypt(nonce, ct + tag, None)
+        except InvalidTag:
+            print(f"  batch {batch_index}: AUTH TAG FAILED (wrong key or tampered), discarded")
+            n_bad += 1
+            pos = end
+            continue
         if zlib.crc32(pt) != crc_stored:
-            status.append("CRC MISMATCH")
+            status_notes.append("CRC MISMATCH")
+        if len(pt) % CHUNK_BYTES:
+            if len(pt) % OBSOLETE_CHUNK_BYTES == 0:
+                print(f"  batch {batch_index}: obsolete 7400 B payload-type-2 chunk layout, discarded")
+            else:
+                print(
+                    f"  batch {batch_index}: invalid plaintext length {len(pt)} B "
+                    f"(expected multiple of {CHUNK_BYTES}), discarded"
+                )
+            n_bad += 1
+            pos = end
+            continue
 
-        for chunk_off in range(0, len(pt), chunk_bytes):
-            chunk = pt[chunk_off:chunk_off + chunk_bytes]
+        for chunk_off in range(0, len(pt), CHUNK_BYTES):
+            chunk = pt[chunk_off:chunk_off + CHUNK_BYTES]
             ch1 = struct.unpack_from(f"<{CHUNK_SAMPLES}i", chunk, 0)
-            loff = chunk[CHUNK_SAMPLES * 4:CHUNK_EMG_BYTES]
             for i in range(CHUNK_SAMPLES):
-                csv_out.write(f"{sample_index},{batch_index},{ch1[i]},0x{loff[i]:02X}\n")
+                csv_out.write(f"{sample_index},{batch_index},{ch1[i]}\n")
                 sample_index += 1
-            if imu_out is not None:
-                for s in IMU_STRUCT.iter_unpack(chunk[CHUNK_EMG_BYTES:]):
-                    imu_out.write(f"{imu_index},{batch_index},"
-                                  + ",".join(str(v) for v in s) + "\n")
-                    imu_index += 1
+            for s in IMU_STRUCT.iter_unpack(chunk[CHUNK_EMG_BYTES:]):
+                imu_out.write(f"{imu_index},{batch_index},"
+                              + ",".join(str(v) for v in s) + "\n")
+                imu_index += 1
 
         n_ok += 1
-        note = f" [{', '.join(status)}]" if status else ""
+        note = f" [{', '.join(status_notes)}]" if status_notes else ""
         print(f"  batch {batch_index}: {emg_n} EMG / {imu_n} IMU samples, "
               f"start {start_time}, tag OK{note}")
         pos = end
@@ -182,9 +203,6 @@ def main():
                                   "(default: read from recording.key next to this script)")
     ap.add_argument("-o", "--output", type=Path,
                     help="output CSV (default: <input>_data.csv)")
-    ap.add_argument("--legacy-swap32", action="store_true",
-                    help="decode pre-DataType-fix recordings (sessions made "
-                         "before 2026-06-11; word-swapped GCM, tag not verified)")
     args = ap.parse_args()
 
     key = bytes.fromhex(args.key) if args.key else load_key_file(KEY_FILE)
@@ -196,29 +214,29 @@ def main():
         sys.exit("File too short")
     info = parse_file_header(data[:FILE_HEADER_SIZE])
 
+    nonce_scheme = {0: "legacy time+id", 1: "entropy salt"}.get(
+        info["nonce_scheme"], f"unknown({info['nonce_scheme']})")
     print(f"Session {info['session_id']}, started {info['start_time']}, "
           f"EMG {info['emg_rate_hz']} Hz, IMU {info['imu_rate_hz']} Hz, "
           f"device UID {info['device_uid']}")
-    print(f"Key id {info['key_id']} v{info['key_version']}, "
+    print(f"Key id {info['key_id']} v{info['key_version']}, nonce {nonce_scheme}, "
+          f"EMG gain {info['emg_pga_gain']} @ {info['emg_ref_mv']} mV ref, "
           f"ADS regs {info['ads_regs']}")
 
+    ensure_batch_markers(data)
+
     out_path = args.output or args.file.with_name(args.file.stem + "_data.csv")
-    has_imu = info["payload_type"] == 2
     imu_path = out_path.with_name(out_path.stem.removesuffix("_data") + "_imu.csv")
     with open(out_path, "w", newline="") as csv_out, \
-         open(imu_path, "w", newline="") if has_imu else nullcontext() as imu_out:
-        csv_out.write("sample_index,batch_index,ch1,loff\n")
-        if has_imu:
-            imu_out.write("imu_index,batch_index,ax,ay,az,gx,gy,gz,mx,my,mz\n")
-        n_ok, n_bad, n_samples, n_imu = decode_batches(
-            data, key, csv_out, imu_out,
-            chunk_bytes=CHUNK_BYTES[info["payload_type"]],
-            legacy=args.legacy_swap32)
+         open(imu_path, "w", newline="") as imu_out:
+        csv_out.write("sample_index,batch_index,ch1\n")
+        imu_out.write("imu_index,batch_index,ax,ay,az,gx,gy,gz,mx,my,mz\n")
+        n_ok, n_bad, n_samples, n_imu = decode_batches(data, key, csv_out, imu_out)
 
     print(f"Done: {n_ok} batches OK, {n_bad} failed, "
-          f"{n_samples} EMG samples -> {out_path}"
-          + (f", {n_imu} IMU samples -> {imu_path}" if has_imu else ""))
+          f"{n_samples} EMG samples -> {out_path}, {n_imu} IMU samples -> {imu_path}")
 
 
 if __name__ == "__main__":
     main()
+
