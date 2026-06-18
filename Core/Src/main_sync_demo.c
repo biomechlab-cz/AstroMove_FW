@@ -32,15 +32,16 @@ I2C_HandleTypeDef hi2c1;
 
 /* ---- forward decls ---- */
 void SystemClock_Config(void);
-static void gpio_init(void);
-static void i2c1_init(void);
-static void sync_a_output(void);
-static void sync_a_input(void);
-static int  connector_present(void);
-static int  pulse_received(void);
-static void send_pulse(void);
-static void set_rtc_zero(void);
-static void signal_blinks(uint8_t n);
+static void    gpio_init(void);
+static void    i2c1_init(void);
+static void    sync_a_output(void);
+static void    sync_a_input(void);
+static int     connector_present(void);
+static int     pulse_received(void);
+static void    send_pulse(void);
+static void    set_rtc_zero(void);
+static uint8_t read_rtc_sec(void);
+static void    signal_blinks(uint8_t n);
 
 /* ==================================================================== */
 
@@ -49,51 +50,88 @@ int main(void)
     HAL_Init();
     SystemClock_Config();
     gpio_init();
+
+    /* Immediate startup blink — confirms HAL_Delay works before any I2C */
+    HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_SET);
+    HAL_Delay(300);
+    HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
+    HAL_Delay(200);
+
+    /* TPS_ON: power gate — needed for I2C sensors on some boards */
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_11, GPIO_PIN_SET);
+    HAL_Delay(50);
+
+    i2c_bus_recovery();
     i2c1_init();
-    I2C_Sensors_Init(&hi2c1);
 
+    /* Enable internal 40kΩ pull-ups on PA9(SCL) and PA10(SDA).
+       MspInit uses GPIO_NOPULL assuming external pull-ups exist.
+       Internal pull-ups let the bus work even if external ones are absent. */
+    GPIO_InitTypeDef g2 = {0};
+    g2.Pin       = GPIO_PIN_9 | GPIO_PIN_10;
+    g2.Mode      = GPIO_MODE_AF_OD;
+    g2.Pull      = GPIO_PULLUP;
+    g2.Speed     = GPIO_SPEED_FREQ_LOW;
+    g2.Alternate = GPIO_AF4_I2C1;
+    HAL_GPIO_Init(GPIOA, &g2);
+
+    HAL_Delay(100);
+
+    I2C_Sensors_Init(&hi2c1);  /* sets internal _hi2c pointer; IMU/mag NAKs are fine */
+
+    /* ---- sync sequence ---- */
     if (connector_present()) {
-
-        /* 1 blink = sending our pulse */
-        signal_blinks(1);
+        signal_blinks(1);       /* 1 blink = sending pulse */
         send_pulse();
-        set_rtc_zero();                              /* our RTC clock starts here */
+        set_rtc_zero();
 
-        /* Go dark and listen for peer's pulse */
+        /* go dark, listen for peer */
         HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
-
         uint32_t deadline = HAL_GetTick() + 3000;
         while (HAL_GetTick() < deadline && connector_present()) {
             if (pulse_received()) {
-                while (pulse_received()) {}          /* wait for pulse to end */
-                set_rtc_zero();                      /* re-sync RTC to peer's pulse moment */
-                signal_blinks(5);                    /* 5 blinks = synced */
+                while (pulse_received()) {}
+                set_rtc_zero();
+                signal_blinks(5);   /* 5 blinks = synced */
                 break;
             }
         }
 
-        /* Stay dark, wait for cable to be unplugged */
+        /* stay dark until cable is removed */
         HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
         while (connector_present()) {}
     }
 
-    /* LED on odd RTC seconds, off on even — both devices share the same RTC zero */
+    signal_blinks(3);   /* 3 blinks = starting */
+
+    /* if RTC not responding, rapid blink as error */
+    if (read_rtc_sec() == 0xFF) {
+        while (1) { HAL_GPIO_TogglePin(LED_PORT, LED_PIN); HAL_Delay(100); }
+    }
+
+
+
+    /* LED ON on odd RTC seconds, OFF on even */
     while (1) {
-        RTC_Time_t t = {0};
-        RV3028_ReadTime(&t);
-        uint8_t sec = (uint8_t)((t.sec >> 4) * 10 + (t.sec & 0x0F));  /* BCD → decimal */
-        HAL_GPIO_WritePin(LED_PORT, LED_PIN,
-                          (sec & 1) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        uint8_t sec = read_rtc_sec();
+        HAL_GPIO_WritePin(LED_PORT, LED_PIN, (sec & 1) ? GPIO_PIN_SET : GPIO_PIN_RESET);
         HAL_Delay(50);
     }
 }
 
-/* ==================================================================== */
+
 
 static void set_rtc_zero(void)
 {
-    RTC_Time_t t = {0};  /* 00:00:00  00/00/00 — all BCD zeros */
+    RTC_Time_t t = {0};
     RV3028_SetTime(&t);
+}
+
+static uint8_t read_rtc_sec(void)
+{
+    RTC_Time_t t = {0};
+    if (!RV3028_ReadTime(&t)) return 0xFF;
+    return (uint8_t)((t.sec >> 4) * 10 + (t.sec & 0x0F));
 }
 
 static void signal_blinks(uint8_t n)
@@ -177,7 +215,7 @@ static void gpio_init(void)
 static void i2c1_init(void)
 {
     hi2c1.Instance             = I2C1;
-    hi2c1.Init.Timing          = 0x00503D58;  /* 100 kHz at 16 MHz HSI */
+    hi2c1.Init.Timing          = 0xF0413131;  /* ~10 kHz — tolerates weak/missing pull-ups */
     hi2c1.Init.OwnAddress1     = 0;
     hi2c1.Init.AddressingMode  = I2C_ADDRESSINGMODE_7BIT;
     hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;

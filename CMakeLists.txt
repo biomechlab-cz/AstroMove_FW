@@ -45,10 +45,10 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/i2c_sensors.c
-    Core/Src/ads1292.c
-    Core/Src/sd_card.c
-    Core/Src/acquisition.c
-    Core/Src/sd_dma.c
+#    Core/Src/ads1292.c
+#    Core/Src/sd_card.c
+#    Core/Src/acquisition.c
+#    Core/Src/sd_dma.c
 )
 
 # Add include paths

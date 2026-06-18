@@ -29,8 +29,7 @@ set(MX_Application_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/../../FATFS/Target/bsp_driver_sd.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../FATFS/Target/sd_diskio.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../FATFS/Target/fatfs_platform.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/main.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/freertos.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/main_sync_demo.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/stm32l4xx_it.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/stm32l4xx_hal_msp.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/stm32l4xx_hal_timebase_tim.c
