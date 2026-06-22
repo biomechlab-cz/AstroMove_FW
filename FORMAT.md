@@ -157,31 +157,48 @@ Header row, then one row per completed batch:
 
 ```
 session_id,batch_index,start_timestamp,end_timestamp,emg_sample_count,
-imu_sample_count,unencrypted_payload_bytes,encrypted_payload_bytes,write_time_ms,
-crc32_plaintext,dropped_samples,temperature_c,error_flags,storage_status,
-ch1_leadoff_samples,ch1_saturated_samples,ch1_quality_flags,
-ch1_flatline_chunks,ch1_baseline_drift_chunks
+imu_sample_count,payload_bytes,write_time_ms,crc32_plaintext,
+dropped_samples,temperature_c,error_flags,storage_status,
+ch1_saturated_samples,ch1_flatline_chunks,ch1_baseline_drift_chunks,
+ch1_leadoff_chunks,ch1_diff_abs_sum_min,ch1_diff_abs_sum_med,ch1_diff_abs_sum_max
 ```
 
+Readers must key columns by **header name** and tolerate columns being added/removed
+across firmware revisions — do not rely on fixed positions.
+
 - Timestamps are BCD `YYMMDDhhmmss` (session-relative; see RTC note in §6).
+- `payload_bytes`: plaintext bytes encrypted in the batch (`chunk_count × 6400`).
+  AES-GCM ciphertext length equals plaintext length, so this is also the encrypted
+  payload size; the 16-byte tag and CRC live in the batch trailer, not here.
 - `error_flags` (hex, bit field): `0x01` WRITE, `0x02` SYNC, `0x04` RTC,
   `0x08` DROPPED, `0x10` AES, `0x20` PARTIAL.
-- `storage_status` is `OK` or `ERR`.
-- `ch1_leadoff_samples`: count of CH1 (IN1P/IN1N) lead-off samples in the batch —
-  the per-batch summary that replaces the dropped per-sample status byte. `0` means
-  the electrodes were attached for the whole batch.
+- `storage_status` is `OK` or `ERR` (set when `error_flags` has WRITE or SYNC).
 - `ch1_saturated_samples`: count of CH1 samples railed to within 8 LSB of ±full-scale.
-  Catches a bad/high-impedance contact that saturates the input without tripping
-  lead-off (the LED also lights for this). `0` is normal.
-- `ch1_quality_flags`: hex bit field OR-ed across the batch: `0x01` FLATLINE,
-  `0x02` BASELINE_DRIFT. These are real-time chunk quality checks; they do not
-  change the encrypted payload layout.
-- `ch1_flatline_chunks`: count of 1-second chunks where CH1 was stuck, nearly
-  flat, or repeated the same ADC code for almost the whole chunk. This is treated
-  as hard bad contact / unusable signal and uses the lead-off LED pattern.
-- `ch1_baseline_drift_chunks`: count of 1-second chunks where the mean of the
-  last 100 samples moved by at least 100000 ADC counts from the first 100 samples.
-  This is treated as a noisy/motion-artifact warning.
+  Sample-resolution clipping — catches a brief rail inside an otherwise-good chunk
+  (the LED also lights for this). `0` is normal.
+
+The next four columns classify each 1-second chunk into one of the mutually
+exclusive CH1 quality states (a chunk is counted in at most one of them, in this
+priority): **flatline → lead-off → baseline-drift → clean**.
+
+- `ch1_flatline_chunks`: chunks where CH1 was stuck, nearly flat, or repeated the
+  same ADC code for almost the whole second — hard dead/stuck signal.
+- `ch1_leadoff_chunks`: chunks flagged as electrode-disconnected by the **signal-based**
+  lead-off detector (the ADS hardware comparators are off, so this replaces them). A
+  disconnected electrode shows one of two signatures, and a connected electrode's
+  sum-of-abs-sample-differences sits in a band between them, so a chunk is lead-off when
+  that sum is **below** `QUALITY_LEADOFF_DIFF_SUM_COUNTS` (quiet/open electrode) **or
+  above** `QUALITY_LEADOFF_HI_DIFF_SUM_COUNTS` (wild/floating electrode picking up
+  interference) — but not flat. Treated as hard bad contact; uses the lead-off LED.
+- `ch1_baseline_drift_chunks`: chunks (not already flat/lead-off) where the mean of the
+  last 100 samples moved ≥ 100000 ADC counts from the first 100 — connected-but-drifting
+  (motion / sweat / half-cell drift). Treated as a noisy/motion-artifact warning.
+- `ch1_diff_abs_sum_min` / `_med` / `_max`: the **continuous level metric** — the min,
+  median, and max across the batch's chunks of each chunk's sum-of-abs-sample-differences
+  (the exact quantity the two lead-off thresholds compare against). This makes the
+  thresholds re-tunable from the CSV alone (no EMX decode) and exposes signal magnitude:
+  quiet float ≈ hundreds of k, connected EMG ≈ low millions, wild float ≈ tens of M
+  (mains environment — all shift on battery). Clamped to 32-bit.
 
 ## 9. Physical scaling (for analysis / ML)
 

@@ -122,7 +122,6 @@ volatile uint32_t g_isr_max_cycles = 0;    /* worst-case ISR duration (debug) */
    the lead-off bit positions on hardware over SWD. */
 #define LEADOFF_DEBOUNCE 50                /* consecutive lead-off samples (~50 ms at 1 kSPS) */
 volatile uint8_t  g_leadoff_active = 0;
-volatile uint32_t g_leadoff_count = 0;     /* CH1 lead-off samples since last chunk (→ CSV) */
 volatile uint8_t  g_stat0_or = 0;
 volatile uint8_t  g_stat1_or = 0;
 static   uint16_t s_leadoff_run = 0;
@@ -153,11 +152,28 @@ static uint8_t  s_bad_signal_on = 0;
 #define QUALITY_FLATLINE_REPEAT_RUN          950
 #define QUALITY_BASELINE_EDGE_SAMPLES        100
 #define QUALITY_BASELINE_DRIFT_COUNTS        100000
+/* Signal-based lead-off (the ADS hardware comparators are off — see ads1292.c).
+   A connected body couples mains + baseline, so a 1 s chunk's sum-of-abs-diffs is
+   in the millions; a disconnected electrode is far quieter. Measured: disconnected
+   ~450k–495k, connected >2.9M (rest ~5M). Below this threshold (but not flatline)
+   → electrode likely off. Calibrated in a mains environment — RE-TUNE for battery,
+   where the connected level drops (use samples/_calib_leadoff.py on new sessions). */
+#define QUALITY_LEADOFF_DIFF_SUM_COUNTS      1000000
+/* The other lead-off signature: a floating electrode left dangling/coupled doesn't go
+   quiet — it picks up huge interference and swings wildly. Across hardware test
+   sessions the bands separated cleanly: connected EMG ≤ ~7.5M, wild float ≥ ~16M, with
+   an empty gap between. Anything above this upper bound is treated as floating bad
+   contact. Same mains-environment calibration caveat — on battery both the connected
+   level and the float pickup drop, so RE-TUNE (samples/_leadoff_perchunk.py). If strong
+   voluntary EMG ever false-trips this, raise it (observed wild floats were ≥ 16M). */
+#define QUALITY_LEADOFF_HI_DIFF_SUM_COUNTS   12000000
 
 typedef struct {
     uint32_t flags;
     uint32_t flatline_chunks;
     uint32_t baseline_drift_chunks;
+    uint32_t leadoff_chunks;
+    uint32_t diff_abs_sum;   /* this chunk's sum-of-abs-diffs (continuous level metric) */
     uint8_t  bad_contact;
     uint8_t  noisy;
 } ACQ_SignalQuality;
@@ -210,17 +226,29 @@ static ACQ_SignalQuality analyze_signal_quality(const int32_t ch1[REC_CHUNK_SAMP
         q.flags |= REC_SIGQ_FLATLINE;
         q.flatline_chunks = 1;
         q.bad_contact = 1;
+    } else if (diff_abs_sum < QUALITY_LEADOFF_DIFF_SUM_COUNTS ||
+               diff_abs_sum > QUALITY_LEADOFF_HI_DIFF_SUM_COUNTS) {
+        /* Not flat, but outside the connected-EMG band → lead-off. Two signatures:
+           too quiet (open electrode settled) or too wild (floating electrode picking
+           up interference). Connected EMG sits between the two thresholds. */
+        q.flags |= REC_SIGQ_LEADOFF;
+        q.leadoff_chunks = 1;
+        q.bad_contact = 1;
     }
 
     int64_t baseline_delta =
         (last_edge_sum - first_edge_sum) / QUALITY_BASELINE_EDGE_SAMPLES;
-    if (!(q.flags & REC_SIGQ_FLATLINE) &&
+    if (!(q.flags & (REC_SIGQ_FLATLINE | REC_SIGQ_LEADOFF)) &&
         abs_i64(baseline_delta) >= QUALITY_BASELINE_DRIFT_COUNTS) {
         q.flags |= REC_SIGQ_BASELINE_DRIFT;
         q.baseline_drift_chunks = 1;
         q.noisy = 1;
     }
 
+    /* Report the raw level so thresholds stay re-tunable from the control CSV
+       alone (no EMX decode). Clamp the int64 accumulator into uint32. */
+    q.diff_abs_sum = (diff_abs_sum > 0xFFFFFFFF) ? 0xFFFFFFFFu
+                                                 : (uint32_t)diff_abs_sum;
     return q;
 }
 
@@ -239,17 +267,16 @@ void ACQ_DRDY_Callback(void)
     uint8_t raw[9];
     ADS1292_ReadRawFast(raw); /* direct-register read, sends NOPs on MOSI */
 
-    /* Normalized lead-off status (ADS1292_NORMALIZE_STATUS) is computed only for
-       the live LED and the per-batch lead-off count — it is NOT stored per sample.
+    /* Normalized lead-off status (ADS1292_NORMALIZE_STATUS) drives only the live
+       LED (HW comparators are off, so it is inert today) — it is NOT stored.
        Done before the ring check so a dropped sample still updates signal quality. */
     uint8_t status = ADS1292_NORMALIZE_STATUS(raw[0], raw[1]);
     g_stat0_or |= raw[0];   /* sticky raw ORs kept for SWD bring-up/debug */
     g_stat1_or |= raw[1];
 
-    /* CH1 (IN1P/IN1N) carries the EMG. Count every lead-off sample for the
-       per-batch CSV summary, and debounce a sustained run for the LED. */
+    /* CH1 (IN1P/IN1N) carries the EMG. Debounce a sustained HW lead-off run for
+       the LED (signal-based lead-off is detected per-chunk in the main loop). */
     if (status & ADS1292_STATUS_CH1_LEADOFF) {
-        g_leadoff_count++;
         if (s_leadoff_run < LEADOFF_DEBOUNCE) s_leadoff_run++;
     } else {
         s_leadoff_run = 0;
@@ -373,19 +400,18 @@ void ACQ_Process(void)
 
             __disable_irq();
             uint32_t dropped = g_dropped_count;
-            uint32_t leadoff = g_leadoff_count;
             uint32_t saturated = g_saturated_count;
             g_dropped_count = 0;
-            g_leadoff_count = 0;
             g_saturated_count = 0;
             __enable_irq();
 
             ACQ_SignalQuality quality = analyze_signal_quality(s_ch1);
 
-            if (!REC_WriteChunk(s_ch1, s_imu, dropped, leadoff, saturated,
-                                quality.flags,
+            if (!REC_WriteChunk(s_ch1, s_imu, dropped, saturated,
                                 quality.flatline_chunks,
-                                quality.baseline_drift_chunks)) {
+                                quality.baseline_drift_chunks,
+                                quality.leadoff_chunks,
+                                quality.diff_abs_sum)) {
                 LED_SetState(LED_FAULT_STORAGE);  /* SysTick keeps the pattern alive */
                 while (1) { }
             }

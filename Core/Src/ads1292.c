@@ -54,7 +54,11 @@ void ADS1292_Init(SPI_HandleTypeDef *hspi)
     /* Register configuration — based on ProtoCentral V/Ohm reference setup */
     ads_wreg(ADS1292_REG_CONFIG1, 0x03);  /* CONFIG1:  1 kSPS output data rate */
     HAL_Delay(10);
-    ads_wreg(ADS1292_REG_CONFIG2, 0b11100000);  /* CONFIG2:  lead-off comparators ON (PDB_LOFF_COMP, bit6), internal 2.42 V reference, test signal off */
+    ads_wreg(ADS1292_REG_CONFIG2, 0b10100000);  /* CONFIG2:  lead-off comparators OFF (PDB_LOFF_COMP=0), internal 2.42 V ref, test off.
+                                                    Matches the proven 2-electrode EMG init: enabling the lead-off comparators/current
+                                                    sources unbalances the high-Z inputs and converts mains common-mode to differential,
+                                                    swamping the EMG with 50 Hz. Lead-off detection is therefore disabled (saturation
+                                                    detection still works). */
     HAL_Delay(10);
     ads_wreg(ADS1292_REG_LOFF, ADS1292_LOFF_CONFIG);  /* lead-off current/threshold — tune via ADS1292_LOFF_CONFIG in ads1292.h */
     HAL_Delay(10);
@@ -64,7 +68,7 @@ void ADS1292_Init(SPI_HandleTypeDef *hspi)
     HAL_Delay(10);
     ads_wreg(ADS1292_REG_RLDSENS, 0x00);  /* RLDSENS:  RLD channel routing off */
     HAL_Delay(10);
-    ads_wreg(ADS1292_REG_LOFFSENS, 0x03);  /* LOFFSENS: lead-off detection on IN1P/IN1N (CH1 only — CH2 unused/floating) */
+    ads_wreg(ADS1292_REG_LOFFSENS, 0x0F);  /* LOFFSENS: inert while the lead-off comparators are off (matches the proven EMG init) */
     HAL_Delay(10);
     ads_wreg(ADS1292_REG_RESP1, 0b11110010);  /* RESP1:    demodulator+modulator on, RLDREF internal, 32 kHz clock */
     HAL_Delay(10);

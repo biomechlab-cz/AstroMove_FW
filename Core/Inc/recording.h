@@ -33,9 +33,13 @@ typedef struct {
 #define REC_ERR_AES      0x10  /* AES peripheral error, batch undecryptable */
 #define REC_ERR_PARTIAL  0x20  /* batch closed early (recording stopped) */
 
-/* signal_quality_flags bits reported in the control CSV */
+/* Per-chunk signal-quality flags, used internally by the acquisition quality check
+   to classify each chunk (no longer a CSV column — the per-batch *_chunks counts are). */
 #define REC_SIGQ_FLATLINE        0x01  /* CH1 is stuck or almost flat for a full chunk */
 #define REC_SIGQ_BASELINE_DRIFT  0x02  /* CH1 baseline moved too far within a chunk */
+#define REC_SIGQ_LEADOFF         0x04  /* CH1 outside the connected band for a full chunk → electrode likely
+                                          disconnected: too quiet OR too wild (signal-based lead-off; the HW
+                                          comparators are off — see ads1292.c) */
 
 /* Create session files and write the file header. SD card must already be
    mounted. ads_regs: ADS1292R registers ID,CONFIG1,CONFIG2,LOFF,CH1SET,
@@ -50,21 +54,23 @@ uint8_t REC_Open(const uint8_t ads_regs[10]);
 void REC_SetNonceSalt(const uint8_t nonce_salt[8]);
 
 /* Encrypt and append one chunk (ch1 + IMU; no per-sample status is stored).
-   dropped_samples / leadoff_samples / saturated_samples: samples lost, CH1
-   lead-off samples, and CH1 near-full-scale (railed) samples since the previous
-   chunk — all accumulated over the batch and reported in the control CSV
-   (FORMAT.md §8). Every REC_CHUNKS_PER_BATCH-th chunk finalizes the batch (tag +
-   trailer + CSV row + sync). Returns 0 on unrecoverable storage failure. */
-/* signal_quality_flags and the *_chunks counters are accumulated into the same
-   per-batch CSV row; the encrypted payload remains ch1 + IMU only. */
+   dropped_samples / saturated_samples: samples lost and CH1 near-full-scale (railed)
+   samples since the previous chunk. flatline_chunks / baseline_drift_chunks /
+   leadoff_chunks: 1 if this chunk tripped that quality check, else 0. diff_abs_sum:
+   this chunk's sum-of-abs-sample-differences — the continuous level metric the lead-off
+   thresholds compare against (its batch min/median/max go to the CSV so the thresholds
+   stay re-tunable without decoding the EMX). All are accumulated/summarized over the
+   batch into the control CSV (FORMAT.md §8); the encrypted payload stays ch1 + IMU only.
+   Every REC_CHUNKS_PER_BATCH-th chunk finalizes the batch (tag + trailer + CSV row +
+   sync). Returns 0 on unrecoverable storage failure. */
 uint8_t REC_WriteChunk(const int32_t ch1[REC_CHUNK_SAMPLES],
                        const REC_ImuSample imu[REC_CHUNK_IMU_SAMPLES],
                        uint32_t dropped_samples,
-                       uint32_t leadoff_samples,
                        uint32_t saturated_samples,
-                       uint32_t signal_quality_flags,
                        uint32_t flatline_chunks,
-                       uint32_t baseline_drift_chunks);
+                       uint32_t baseline_drift_chunks,
+                       uint32_t leadoff_chunks,
+                       uint32_t diff_abs_sum);
 
 /* Finalize an in-progress batch (marked REC_ERR_PARTIAL) and close both
    files. Safe to call when nothing is open. */

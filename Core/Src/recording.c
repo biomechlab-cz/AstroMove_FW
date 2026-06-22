@@ -84,11 +84,11 @@ static uint32_t   s_chunk_count;
 static uint32_t   s_payload_bytes;   /* plaintext bytes encrypted so far */
 static uint32_t   s_crc;
 static uint32_t   s_dropped;
-static uint32_t   s_leadoff;         /* CH1 lead-off samples accumulated this batch (CSV summary) */
 static uint32_t   s_saturated;       /* CH1 near-full-scale (railed) samples this batch (CSV summary) */
-static uint32_t   s_signal_quality;  /* OR of REC_SIGQ_* flags observed in this batch */
 static uint32_t   s_flatline_chunks;
 static uint32_t   s_baseline_drift_chunks;
+static uint32_t   s_leadoff_chunks;  /* chunks flagged as electrode-disconnected (signal-based) */
+static uint32_t   s_diff[REC_CHUNKS_PER_BATCH];  /* per-chunk diff_abs_sum (level metric) for this batch */
 static uint32_t   s_write_ms;        /* f_write + f_sync time spent on this batch */
 static uint8_t    s_error_flags;
 
@@ -302,6 +302,24 @@ static uint8_t rec_begin_batch(void)
     return 1;
 }
 
+/* min / median / max of this batch's per-chunk diff_abs_sum (the level metric).
+   s_chunk_count chunks were stored in s_diff[]; insertion-sort a copy (n ≤ 10). */
+static void diff_stats(uint32_t *mn, uint32_t *md, uint32_t *mx)
+{
+    uint32_t n = s_chunk_count;
+    if (n == 0) { *mn = *md = *mx = 0; return; }
+    uint32_t t[REC_CHUNKS_PER_BATCH];
+    for (uint32_t i = 0; i < n; i++) t[i] = s_diff[i];
+    for (uint32_t i = 1; i < n; i++) {
+        uint32_t v = t[i], j = i;
+        while (j > 0 && t[j - 1] > v) { t[j] = t[j - 1]; j--; }
+        t[j] = v;
+    }
+    *mn = t[0];
+    *md = t[n / 2];
+    *mx = t[n - 1];
+}
+
 static void rec_append_csv_row(void)
 {
     RTC_Time_t end_time = {0};
@@ -319,15 +337,17 @@ static void rec_append_csv_row(void)
         snprintf(temp_str, sizeof(temp_str), "%d.%d", temp / 10,
                  (temp < 0 ? -temp : temp) % 10);
 
+    uint32_t d_min, d_med, d_max;
+    diff_stats(&d_min, &d_med, &d_max);
+
     char row[256];
     int len = snprintf(row, sizeof(row),
-        "%lu,%lu,%s,%s,%lu,%lu,%lu,%lu,%lu,%08lX,%lu,%s,0x%02X,%s,%lu,%lu,0x%02lX,%lu,%lu\r\n",
+        "%lu,%lu,%s,%s,%lu,%lu,%lu,%lu,%08lX,%lu,%s,0x%02X,%s,%lu,%lu,%lu,%lu,%lu,%lu,%lu\r\n",
         (unsigned long)s_session_id,
         (unsigned long)s_batch_index,
         ts_start, ts_end,
         (unsigned long)(s_chunk_count * REC_CHUNK_SAMPLES),
         (unsigned long)(s_chunk_count * REC_CHUNK_IMU_SAMPLES),
-        (unsigned long)s_payload_bytes,
         (unsigned long)s_payload_bytes,
         (unsigned long)s_write_ms,
         (unsigned long)(s_crc ^ 0xFFFFFFFF),
@@ -335,11 +355,13 @@ static void rec_append_csv_row(void)
         temp_str,
         s_error_flags,
         (s_error_flags & (REC_ERR_WRITE | REC_ERR_SYNC)) ? "ERR" : "OK",
-        (unsigned long)s_leadoff,
         (unsigned long)s_saturated,
-        (unsigned long)s_signal_quality,
         (unsigned long)s_flatline_chunks,
-        (unsigned long)s_baseline_drift_chunks);
+        (unsigned long)s_baseline_drift_chunks,
+        (unsigned long)s_leadoff_chunks,
+        (unsigned long)d_min,
+        (unsigned long)d_med,
+        (unsigned long)d_max);
 
     UINT bw;
     f_write(&s_csv, row, (UINT)len, &bw);
@@ -386,11 +408,10 @@ static uint8_t rec_end_batch(void)
     s_batch_index++;
     s_batch_open  = 0;
     s_dropped     = 0;
-    s_leadoff     = 0;
     s_saturated   = 0;
-    s_signal_quality = 0;
     s_flatline_chunks = 0;
     s_baseline_drift_chunks = 0;
+    s_leadoff_chunks = 0;
     s_write_ms    = 0;
     s_error_flags = 0;
     return fr == FR_OK;
@@ -470,11 +491,12 @@ uint8_t REC_Open(const uint8_t ads_regs[10])
 
     static const char csv_header[] =
         "session_id,batch_index,start_timestamp,end_timestamp,"
-        "emg_sample_count,imu_sample_count,unencrypted_payload_bytes,"
-        "encrypted_payload_bytes,write_time_ms,crc32_plaintext,"
+        "emg_sample_count,imu_sample_count,payload_bytes,"
+        "write_time_ms,crc32_plaintext,"
         "dropped_samples,temperature_c,error_flags,storage_status,"
-        "ch1_leadoff_samples,ch1_saturated_samples,ch1_quality_flags,"
-        "ch1_flatline_chunks,ch1_baseline_drift_chunks\r\n";
+        "ch1_saturated_samples,ch1_flatline_chunks,ch1_baseline_drift_chunks,"
+        "ch1_leadoff_chunks,ch1_diff_abs_sum_min,ch1_diff_abs_sum_med,"
+        "ch1_diff_abs_sum_max\r\n";
     fr = f_write(&s_csv, csv_header, sizeof(csv_header) - 1, &bw);
     if (fr == FR_OK)
         fr = f_sync(&s_csv);
@@ -486,11 +508,10 @@ uint8_t REC_Open(const uint8_t ads_regs[10])
     s_batch_index = 0;
     s_batch_open  = 0;
     s_dropped     = 0;
-    s_leadoff     = 0;
     s_saturated   = 0;
-    s_signal_quality = 0;
     s_flatline_chunks = 0;
     s_baseline_drift_chunks = 0;
+    s_leadoff_chunks = 0;
     s_write_ms    = 0;
     s_error_flags = 0;
     s_open        = 1;
@@ -516,22 +537,26 @@ void REC_SetNonceSalt(const uint8_t nonce_salt[8])
 uint8_t REC_WriteChunk(const int32_t ch1[REC_CHUNK_SAMPLES],
                        const REC_ImuSample imu[REC_CHUNK_IMU_SAMPLES],
                        uint32_t dropped_samples,
-                       uint32_t leadoff_samples,
                        uint32_t saturated_samples,
-                       uint32_t signal_quality_flags,
                        uint32_t flatline_chunks,
-                       uint32_t baseline_drift_chunks)
+                       uint32_t baseline_drift_chunks,
+                       uint32_t leadoff_chunks,
+                       uint32_t diff_abs_sum)
 {
     if (!s_open) return 0;
     s_dropped += dropped_samples;
-    s_leadoff += leadoff_samples;
     s_saturated += saturated_samples;
-    s_signal_quality |= signal_quality_flags;
     s_flatline_chunks += flatline_chunks;
     s_baseline_drift_chunks += baseline_drift_chunks;
+    s_leadoff_chunks += leadoff_chunks;
 
     if (!s_batch_open && !rec_begin_batch())
         return 0;
+
+    /* record this chunk's level (rec_begin_batch has reset s_chunk_count to 0
+       for a new batch, so the index is the chunk's position within the batch) */
+    if (s_chunk_count < REC_CHUNKS_PER_BATCH)
+        s_diff[s_chunk_count] = diff_abs_sum;
 
     const uint8_t *ch1_bytes = (const uint8_t *)ch1; /* int32 LE on Cortex-M */
     const uint8_t *imu_bytes = (const uint8_t *)imu;
