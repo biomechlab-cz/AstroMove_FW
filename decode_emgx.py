@@ -10,7 +10,7 @@ EMG CSV columns:  sample_index, batch_index, ch1
 IMU CSV columns:  imu_index, batch_index, ax, ay, az, gx, gy, gz, mx, my, mz
 
 Per-sample lead-off status is not stored; the control CSV's per-batch
-ch1_leadoff_samples column carries the lead-off summary instead.
+signal-quality columns (ch1_leadoff_chunks etc.) carry the summary instead.
 
 Older development recordings are an obsolete, incompatible format: the early
 raw-status recordings reused payload type 2 and fail to decode (their chunk size

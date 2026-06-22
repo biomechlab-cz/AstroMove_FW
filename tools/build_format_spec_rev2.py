@@ -220,7 +220,7 @@ def revision_rows():
         ),
         (
             "Lead-off handling",
-            "Do not store a per-sample status byte. Store only a per-batch ch1_leadoff_samples summary in the control CSV.",
+            "Do not store a per-sample status byte. Detect lead-off in software per 1-second chunk and report a per-batch ch1_leadoff_chunks summary (plus the ch1_diff_abs_sum level metric) in the control CSV.",
             "This preserves useful signal-quality observability without increasing the binary payload by 1000 bytes per second.",
         ),
         (
@@ -305,15 +305,19 @@ CSV_ROWS = [
     ("end_timestamp", "Batch end time in BCD YYMMDDhhmmss"),
     ("emg_sample_count", "Nominally 10000 for a full 10-second batch"),
     ("imu_sample_count", "Nominally 1000 for a full 10-second batch"),
-    ("unencrypted_payload_bytes", "Nominally 64000 for a full batch"),
-    ("encrypted_payload_bytes", "Same size as plaintext payload"),
+    ("payload_bytes", "Nominally 64000 for a full batch; AES-GCM ciphertext is the same size"),
     ("write_time_ms", "Time spent in f_write and f_sync for the batch"),
     ("crc32_plaintext", "CRC32 of the plaintext payload"),
     ("dropped_samples", "Samples lost because the acquisition ring overflowed"),
     ("temperature_c", "Optional IMU temperature field"),
     ("error_flags", "Hex bit field: WRITE, SYNC, RTC, DROPPED, AES, PARTIAL"),
     ("storage_status", "OK or ERR"),
-    ("ch1_leadoff_samples", "Count of CH1 lead-off samples in the batch"),
+    ("ch1_saturated_samples", "Count of CH1 samples railed near +/- full-scale"),
+    ("ch1_flatline_chunks / ch1_leadoff_chunks / ch1_baseline_drift_chunks",
+     "Mutually-exclusive per-1s-chunk state counts (stuck/flat -> disconnected -> drifting)"),
+    ("ch1_diff_abs_sum_min / _med / _max",
+     "Per-batch min/median/max of each chunk's sum-of-abs-sample-differences (level metric)"),
+    # NOTE: FORMAT.md SS8 is authoritative for the control-CSV columns; keep this in sync.
 ]
 
 
@@ -432,8 +436,8 @@ def build_document():
         doc,
         "Lead-off policy",
         "Per-sample lead-off status is not stored in the binary payload. Instead, "
-        "the firmware counts CH1 lead-off samples and reports the per-batch summary "
-        "in the control CSV as ch1_leadoff_samples.",
+        "the firmware detects lead-off per 1-second chunk from the signal itself and "
+        "reports the per-batch summary in the control CSV as ch1_leadoff_chunks.",
     )
 
     doc.add_paragraph("6.1 ImuSample layout", style="Heading 2")
