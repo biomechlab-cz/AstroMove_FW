@@ -206,7 +206,7 @@ The header carries everything needed to convert raw counts to physical units:
 ## 10. Multi-device synchronization
 
 Several devices can be recorded as one session and aligned to a common timebase.
-The full hardware/handshake spec is in [`sync_protocol.md`](sync_protocol.md); this
+The full hardware/handshake spec is in [`SYNC_PROTOCOL.md`](SYNC_PROTOCOL.md); this
 section defines what the **files** carry and how a reader uses it.
 
 ### 10.1 How devices share a clock

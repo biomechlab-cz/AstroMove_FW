@@ -85,7 +85,7 @@ Single LED on PB10 today, written RGB-ready (set `LED_HW_RGB=1` + wire 3 pins la
 - EXTI0 must be armed only **after** `ADS1292_StartContinuous()` — the ISR's SPI reads must never overlap main-thread SPI.
 - Debug globals readable over SWD: `g_isr_count/g_spurious_count/g_dropped_count/g_isr_max_cycles/g_sample_index` (acquisition.c), `g_rec_fail_point/code` (recording.c), `g_sd_retry_count/g_sd_fail_count/g_sd_last_stage/g_sd_last_err` (sd_diskio.c).
 
-## Multi-device sync (`Core/Src/sync.c`, FORMAT.md §10, sync_protocol.md)
+## Multi-device sync (`Core/Src/sync.c`, FORMAT.md §10, SYNC_PROTOCOL.md)
 - Synchronizes N devices' EMG sample clocks over a shared bus: **PC6 (Sync A)** = shared **open-drain** signal net (wired-AND, any device pulls low → all see the edge simultaneously); **PC7 (Sync B)** = presence (LOW = cable in). The shared electrical edge — not a mechanical unplug — is the only simultaneous event across devices.
 - `SYNC_Run()` runs in `main.c` **after** EXTI0 is armed (so `g_sample_index` is ticking) and **before** the session opens. Boot order changed: `ACQ_Init()` now only does SD-mount + ADS-reg snapshot; the session is opened by **`ACQ_OpenSession(synced, sync_lead)`** after sync. The documented orderings (reg snapshot before RDATAC, `SeedNonce` before EXTI, SPI 500 k→4 M) are preserved.
 - Each device emits one pulse, then re-latches `g_sample_index` (and zeroes the RTC, coarse) on every PC6 edge **until it is unplugged**; the last edge is common to all devices still on the bus. On unplug: `ACQ_ResetRing()` (discard sync-wait samples) → record. Header stores `synced` (byte 39) + `sync_lead_samples` (bytes 60-63) = samples from the pulse to the first recorded sample; subtract across devices to align (FORMAT.md §10).

@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-/* Multi-device synchronization over the shared sync bus (see sync_protocol.md
+/* Multi-device synchronization over the shared sync bus (see SYNC_PROTOCOL.md
    and FORMAT.md §10).
 
    Lines:

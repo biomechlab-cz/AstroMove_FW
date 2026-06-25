@@ -46,7 +46,11 @@ Device powers on, peripherals up, DRDY ISR armed (EMG sample clock running)
       Yes  (cable present)
        │
        ▼
-  Emit one LOW pulse on PC6, latch own sample index, zero RTC   (LED = SYNC)
+  LED = SYNC (solid); wait a per-device UID stagger
+  (so simultaneous boots don't collide on the wired-AND net)
+       │
+       ▼
+  Emit one LOW pulse on PC6, latch own sample index, zero RTC
        │
        ▼
   ┌─── Re-latch loop (while PC7 == LOW) ───────────────────────┐

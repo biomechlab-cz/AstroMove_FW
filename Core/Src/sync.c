@@ -1,5 +1,5 @@
 /* =====================================================================
- * sync.c — multi-device synchronization (see sync.h, sync_protocol.md,
+ * sync.c — multi-device synchronization (see sync.h, SYNC_PROTOCOL.md,
  * FORMAT.md §10).
  *
  * The shared PC6 net is the synchronization reference: one LOW edge is seen by
