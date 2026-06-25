@@ -1,5 +1,0 @@
-session_id,batch_index,start_timestamp,end_timestamp,emg_sample_count,imu_sample_count,payload_bytes,write_time_ms,crc32_plaintext,dropped_samples,temperature_c,error_flags,storage_status,ch1_saturated_samples,ch1_flatline_chunks,ch1_baseline_drift_chunks,ch1_leadoff_chunks,ch1_diff_abs_sum_min,ch1_diff_abs_sum_med,ch1_diff_abs_sum_max
-100,0,000101000000,000101000010,10000,1000,64000,0,B660D8D1,0,25.3,0x00,OK,0,0,0,0,2872565,2881098,2883633
-100,1,000101000010,000101000020,10000,1000,64000,0,A7C684E6,0,25.3,0x00,OK,0,0,0,3,466349,2878675,2882713
-100,2,000101000020,000101000030,10000,1000,64000,0,799F60B7,0,25.3,0x00,OK,0,0,0,0,2870673,2879773,2884570
-100,3,000101000030,000101000040,10000,1000,64000,0,F6281131,0,25.3,0x00,OK,0,0,0,0,2875790,2879009,2883384

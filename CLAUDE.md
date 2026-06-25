@@ -1,6 +1,6 @@
 # AstroMoWe — NewProject
 
-Full hardware context: [`../HARDWARE.md`](../HARDWARE.md)
+Full hardware context: [`HARDWARE.md`](HARDWARE.md)
 
 ## MCU
 STM32L462RETx (LQFP64), **16 MHz HSI** (PLL disabled in current firmware), STM32CubeIDE project.
@@ -61,7 +61,7 @@ Single LED on PB10 today, written RGB-ready (set `LED_HW_RGB=1` + wire 3 pins la
 - I2C1 uses PCLK1=16 MHz and timing `0x00503D58` (`I2C1_TIMING_100KHZ_16MHZ`) for standard-mode, about 100 kHz. Do not raise this toward fast-mode unless the board pull-ups and all sensors are revalidated.
 
 ## Data storage (EMGX format)
-- **Authoritative spec: [`FORMAT.md`](FORMAT.md)** (EMGX v1: `version=1`, `payload_type=2`, normalized status byte, entropy nonce). Supersedes the higher-level "Format specification.docx". Shared with AstroMoWe_Inspect.
+- **Authoritative spec: [`FORMAT.md`](FORMAT.md)** (EMGX v1: `version=1`, `payload_type=2`, normalized status byte, entropy nonce). Single source of truth for the format, shared with AstroMoWe_Inspect.
 - Writer: `Core/Src/recording.c` — AES-256-GCM (hardware AES peripheral), 10 s batches of 1 s chunks, CRC32 + GCM tag per batch
 - Key: `recording.key` (repo root, **placeholder test key** — replace before deployment); CMake generates `recording_key.h` from it at configure time, `decode_emgx.py` reads it directly
 - Files per session: `SNNNNNNN.EMX` + `SNNNNNNN.CSV` (8.3 names — FatFS `_USE_LFN=0`; enable LFN in CubeMX for the spec's `SESSION_NNNNNNN.emgx`)
