@@ -6,14 +6,6 @@ shared by the firmware writer (`AstroMove_FW`) and the inspector/decoder
 inline comment in `Core/Src/recording.c`. Implementations (firmware C, Python
 `decode_emgx.py`, Rust `astromowe-format`) **must** match this document.
 
-> **Compatibility:** This is the canonical format, identified by `version == 1` and
-> `payload_type == 2` (which alone fixes the chunk layout). Earlier development
-> recordings are an obsolete, incompatible format: the pre-`BATC` files have no batch
-> markers, and the early raw-status recordings (a per-sample status byte → 7400-byte
-> chunks, RTC/session-id nonce) reused `payload_type == 2` — they are no longer
-> distinguished and simply fail to decode (their batch payload length is not a multiple
-> of the 6400-byte chunk).
-
 All integers are **little-endian** unless stated otherwise.
 
 ---
@@ -65,11 +57,11 @@ risks the batch currently being written; all earlier batches stay decodable.
 | 36 | 1  | `key_version` | from `recording.key` |
 | 37 | 1  | `nonce_scheme` | **1 = entropy-seeded random salt + batch counter** (§6) |
 | 38 | 1  | `emg_pga_gain` | ADS1292R CH1 PGA gain (4) — for scaling (§9) |
-| 39 | 1  | — | reserved (0) |
+| 39 | 1  | `synced` | **1 = this session was multi-device synchronized** (§10); 0 = standalone |
 | 40 | 8  | `nonce_prefix` | per-session nonce salt (§6) |
 | 48 | 10 | `ads_regs` | ADS1292R snapshot: `ID,CONFIG1,CONFIG2,LOFF,CH1SET,CH2SET,RLDSENS,LOFFSENS,RESP1,RESP2` |
 | 58 | 2  | `emg_ref_mv` | ADC reference in millivolts (2420 = internal 2.42 V) — for scaling (§9) |
-| 60 | 4  | — | reserved (0) |
+| 60 | 4  | `sync_lead_samples` | u32: EMG samples from the shared sync pulse to the first recorded sample (§10); 0 if `synced = 0` |
 
 ## 4. Batch header (48 bytes, plaintext)
 
@@ -105,11 +97,11 @@ two contiguous columnar sections (convenient for array/columnar loading):
 sign-extended to `int32`. (Channel 2 exists in hardware but is not recorded.)
 
 **Per-sample lead-off status is not stored.** The status LED gives live lead-off
-feedback while recording, and a per-batch count of CH1 lead-off samples is written
-to the control CSV (`ch1_leadoff_samples`, §8). The firmware still derives the
-ADS1292R lead-off comparator outputs each sample (CH1 = IN1P/IN1N off, with
-`CONFIG2.PDB_LOFF_COMP = 1` and `LOFFSENS` enabling CH1) — it summarizes them per
-batch rather than storing one byte per sample.
+feedback while recording, and the current firmware reports signal-based per-chunk
+lead-off summaries in the control CSV (`ch1_leadoff_chunks`, §8). The ADS1292R
+hardware lead-off comparator path is intentionally disabled for the high-Z
+two-electrode textile setup; the payload stores neither per-sample status bytes nor
+hardware-comparator sample counts.
 
 ### 5.1 `ImuSample` (24 bytes, packed little-endian)
 
@@ -133,7 +125,7 @@ batch rather than storing one byte per sample.
   guarantees per-batch uniqueness within a session; the random salt makes the prefix
   unique across sessions **without** depending on the RTC or on monotonic session ids.
 
-  > **Why not the RTC/session-id (the obsolete `nonce_scheme = 0`)?** The RV-3028 RTC
+  > **Why not RTC/session-id nonce derivation?** The RV-3028 RTC
   > resets to ~2000-01-01 on battery disconnect, so that prefix (BCD time + low-16
   > session id) was near-constant; reformatting the SD restarted session ids and
   > recreated earlier prefixes → **GCM nonce reuse under a fixed key** (catastrophic).
@@ -211,18 +203,89 @@ The header carries everything needed to convert raw counts to physical units:
 - **Magnetometer:** 18-bit unsigned; null-field (no field / not measuring) = `131072`.
 - **Time:** `t_emg[i] = i / emg_rate_hz`, `t_imu[i] = i / imu_rate_hz`.
 
-## 10. Versioning policy
+## 10. Multi-device synchronization
+
+Several devices can be recorded as one session and aligned to a common timebase.
+The full hardware/handshake spec is in [`sync_protocol.md`](sync_protocol.md); this
+section defines what the **files** carry and how a reader uses it.
+
+### 10.1 How devices share a clock
+
+Devices are joined by a sync cable on two lines (per device):
+
+- **Sync A (PC6)** — a **shared open-drain signal net** common to all devices,
+  idling high via pull-ups. Any device can pull it low (wired-AND, no contention).
+- **Sync B (PC7)** — **presence**: shorted to GND through the connector, so LOW
+  means the cable is plugged in.
+
+At power-up, with the cable present, each device starts its EMG sample clock,
+emits one LOW pulse on Sync A, and then — until it is unplugged — **re-latches its
+current EMG sample index on every LOW edge it sees on the shared net**. Because the
+net is one electrical node, a pulse is seen by every device on the bus at the same
+instant (wire-propagation skew, far below one sample period); this is the **only**
+event that is simultaneous across the group — an individual connector unplug is
+not. Each device pulses once on arming, so the last edge before unplug is common to
+every device still on the bus. That latched index is the per-device **sync
+reference**. The RTC is also zeroed on each pulse as a coarse (1 s) cross-check.
+
+> Operational requirement: connect the cable **before** power-on (sync runs only at
+> boot), power all devices on within the same window, and **do not unplug any device
+> until all have armed** (LED `SYNC` = **solid**, magenta on RGB) — an early-unplugged
+> device freezes on an earlier pulse. Each device staggers its pulse by a UID-derived
+> delay, so one shared power source is fine.
+> Recording on each device begins when **that** device is unplugged; staggered
+> unplugs are fine because alignment is locked to the pulse, not the unplug.
+
+### 10.2 What the file carries
+
+Two header fields (§3):
+
+- **`synced`** (byte 39): 1 if a sync pulse was latched this session, else 0.
+- **`sync_lead_samples`** (bytes 60–63, u32): the number of EMG samples between the
+  shared sync pulse and the **first recorded sample** of this file
+  (`first_recorded_index − pulse_index`). 0 when `synced = 0`.
+
+The sync pulse itself is **before** the recording starts (recording begins at
+unplug), so it does not appear in the samples — `sync_lead_samples` says how far
+ahead of sample 0 it was. It is exact to ±1 sample under healthy SD; if the session
+shows non-zero early `dropped_samples`, treat it as ±`dropped`.
+
+### 10.3 Aligning streams (reader)
+
+For each device *d*, recorded sample *k* maps to a **pulse-relative** index:
+
+```
+rel_d(k) = k + sync_lead_samples[d]          # samples since the common pulse
+```
+
+Samples from different devices with the **same `rel`** are simultaneous. To align a
+set of files:
+
+1. Require `synced == 1` and equal `emg_rate_hz` on all of them (mixed/standalone
+   files cannot be sample-aligned — fall back to the RTC `start_time_bcd`, ~1 s).
+2. Shift each device by `sync_lead_samples[d]`; the common origin is `rel = 0`
+   (the pulse). The overlapping region is `rel ∈ [max_d(lead_d), …]` truncated to
+   the shortest stream.
+3. Resample/trim to the overlap and emit one aligned, multi-channel matrix.
+
+Precision is one shared electrical edge latched in firmware per device — sample-
+accurate to within each device's pulse-detection latency (sub-millisecond), i.e. ≪
+one EMG sample at 1 kHz. The RTC zero (`start_time_bcd`) is only a coarse fallback.
+
+## 11. Versioning policy
 
 `version` gates header semantics; `payload_type` gates the chunk layout. A reader
-must require `version == 1` and `payload_type == 2`; anything else is incompatible.
-Future additive changes should bump `payload_type` (new chunk layout) or `version`
-(new header) and update this document and all three implementations together.
+must require `version == 1` and `payload_type == 2`; anything else is unsupported.
+The `synced` / `sync_lead_samples` fields are additive within `version = 1`: a reader
+that ignores them still decodes single-device data correctly. Future additive changes
+should bump `payload_type` (new chunk layout) or `version` (new header) and update
+this document and all three implementations together.
 
 
-## 11. Reference implementations
+## 12. Reference implementations
 
 - **Writer:** `AstroMove_FW/Core/Src/recording.c` (+ `acquisition.c` for the
-  per-batch lead-off count and the nonce entropy).
+  per-batch quality summary and the nonce entropy, `sync.c` for the sync sequence).
 - **Decoder (reference):** `AstroMove_FW/decode_emgx.py`.
 - **Sample generator:** `AstroMove_FW/make_sample_emgx.py` (deterministic golden data).
 - **Rust:** `AstroMoWe_Inspect/crates/astromowe-format`.

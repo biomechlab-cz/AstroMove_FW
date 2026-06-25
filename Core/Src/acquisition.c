@@ -115,6 +115,9 @@ volatile uint32_t g_isr_count = 0;
 volatile uint32_t g_spurious_count = 0;    /* edges rejected by debounce */
 volatile uint32_t g_dropped_count = 0;     /* samples lost to a full ring */
 volatile uint32_t g_isr_max_cycles = 0;    /* worst-case ISR duration (debug) */
+volatile uint32_t g_sample_index = 0;      /* free-running count of valid conversions —
+                                              the EMG sample timeline used for multi-device
+                                              sync latching (counts dropped samples too) */
 
 /* Live lead-off (status LED). Asserted after LEADOFF_DEBOUNCE consecutive
    samples with a CH1 electrode off, cleared on the first good sample.
@@ -295,6 +298,10 @@ void ACQ_DRDY_Callback(void)
     }
     g_saturated_active = (s_sat_run >= SAT_DEBOUNCE);
 
+    /* Advance the EMG sample timeline before the ring check, so a dropped
+       sample still ticks the clock used for multi-device sync alignment. */
+    g_sample_index++;
+
     uint16_t next = (uint16_t)((s_ring_head + 1) & RING_MASK);
     if (next == s_ring_tail) {  /* ring full — main loop stalled > ~1 s */
         g_dropped_count++;
@@ -345,6 +352,10 @@ void ACQ_SeedNonce(void)
         salt[i] = (uint8_t)(h >> (8 * i));
     REC_SetNonceSalt(salt);
 }
+/* ADS register snapshot taken in ACQ_Init() (SDATAC mode), held until the
+   session is opened by ACQ_OpenSession() after the sync sequence has run. */
+static uint8_t s_ads_regs[10];
+
 uint8_t ACQ_Init(void)
 {
     /* DWT cycle counter — used by the ISR for DRDY edge debouncing */
@@ -356,21 +367,50 @@ uint8_t ACQ_Init(void)
     if (!sd_init_4bit()) return 0;
     if (f_mount(&s_fs, SDPath, 1) != FR_OK) return 0;
 
-    /* ADS register snapshot for the file header — chip must still be in
-       SDATAC mode (before ADS1292_StartContinuous) */
+    /* ADS register snapshot for the file header — chip must still be in SDATAC
+       mode (before ADS1292_StartContinuous). Stored until ACQ_OpenSession(),
+       which runs after the sync sequence so the header reflects the synced RTC. */
     static const uint8_t reg_addr[10] = {
         ADS1292_REG_ID,      ADS1292_REG_CONFIG1,  ADS1292_REG_CONFIG2,
         ADS1292_REG_LOFF,    ADS1292_REG_CH1SET,   ADS1292_REG_CH2SET,
         ADS1292_REG_RLDSENS, ADS1292_REG_LOFFSENS, ADS1292_REG_RESP1,
         ADS1292_REG_RESP2,
     };
-    uint8_t ads_regs[10];
     for (uint8_t i = 0; i < 10; i++)
-        ads_regs[i] = ADS1292_ReadReg(reg_addr[i]);
+        s_ads_regs[i] = ADS1292_ReadReg(reg_addr[i]);
 
-    /* The AES-GCM nonce salt is seeded later by ACQ_SeedNonce(), once the ADS
-       is streaming in RDATAC (see main.c). REC_Open writes a UID placeholder. */
-    return REC_Open(ads_regs);
+    return 1;
+}
+
+/* Open the recording session (creates the files and writes the header). Called
+   after the sync sequence, so the header carries the synced RTC start time plus
+   the sync result. synced = 1 if a multi-device sync pulse was latched this
+   power-up; sync_lead_samples = EMG samples from the shared sync pulse to the
+   first recorded sample (subtract across devices to align streams — FORMAT.md §10). */
+uint8_t ACQ_OpenSession(uint8_t synced, uint32_t sync_lead_samples)
+{
+    return REC_Open(s_ads_regs, synced, sync_lead_samples);
+}
+
+/* Discard everything sampled so far (e.g. during the sync wait) and clear the
+   drop counter so recording starts clean. Returns the sample index at the reset
+   point — the absolute index of (about) the first sample that will be recorded. */
+uint32_t ACQ_ResetRing(void)
+{
+    __disable_irq();
+    uint32_t idx = g_sample_index;
+    s_ring_head = 0;
+    s_ring_tail = 0;
+    s_count     = 0;
+    g_dropped_count = 0;
+    __enable_irq();
+    return idx;
+}
+
+/* Current value of the free-running EMG sample timeline (see g_sample_index). */
+uint32_t ACQ_SampleIndex(void)
+{
+    return g_sample_index;
 }
 
 void ACQ_Process(void)

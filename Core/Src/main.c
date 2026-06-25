@@ -29,6 +29,7 @@
 #include "ads1292.h"
 #include "acquisition.h"
 #include "led.h"
+#include "sync.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -135,7 +136,8 @@ int main(void)
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_11, GPIO_PIN_SET);
   HAL_Delay(500);
 
-  /* Init SD (4-bit ~470 kHz) and open encrypted recording session */
+  /* Init SD (4-bit ~470 kHz) and snapshot ADS registers. The recording session
+     is opened later by ACQ_OpenSession(), after the sync sequence. */
   if (!ACQ_Init()) {
       LED_SetState(LED_FAULT_INIT);   /* fatal: SysTick blinks the fault pattern */
       while (1) { }
@@ -173,6 +175,25 @@ int main(void)
   MODIFY_REG(SYSCFG->EXTICR[0], SYSCFG_EXTICR1_EXTI0, SYSCFG_EXTICR1_EXTI0_PC);
   __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_0);
   HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+
+  /* Multi-device sync (sync.c / FORMAT.md §10). The DRDY ISR is armed now, so
+     ACQ_SampleIndex() is ticking. If the sync cable is present this blocks —
+     pulsing the shared line and latching the common reference — until the cable
+     is unplugged; with no cable it returns immediately (synced = 0). */
+  SYNC_Result sync = SYNC_Run();
+
+  /* Drop the samples captured during the sync wait so recording starts clean.
+     sync_lead = EMG samples from the shared sync pulse to the first recorded
+     sample; stored in the header so all devices can be aligned (FORMAT.md §10). */
+  uint32_t rec_start_idx = ACQ_ResetRing();
+  uint32_t sync_lead = sync.synced ? (rec_start_idx - sync.pulse_index) : 0;
+
+  /* Open the session now — the header captures the synced RTC start time and the
+     sync result (synced flag + sync_lead). */
+  if (!ACQ_OpenSession(sync.synced, sync_lead)) {
+      LED_SetState(LED_FAULT_INIT);   /* fatal: SysTick blinks the fault pattern */
+      while (1) { }
+  }
 
   /* Acquisition is live — switch to the recording heartbeat (ACQ_Process
      keeps it updated with lead-off / warning conditions from here on) */

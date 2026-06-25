@@ -45,8 +45,12 @@ typedef struct {
    mounted. ads_regs: ADS1292R registers ID,CONFIG1,CONFIG2,LOFF,CH1SET,
    CH2SET,RLDSENS,LOFFSENS,RESP1,RESP2 (stored in the file header). The nonce
    prefix starts as a device-UID placeholder; call REC_SetNonceSalt() before the
-   first chunk to install the entropy salt. Returns 1 on success. */
-uint8_t REC_Open(const uint8_t ads_regs[10]);
+   first chunk to install the entropy salt.
+   synced: 1 if a multi-device sync pulse was latched this power-up (header byte 39).
+   sync_lead_samples: EMG samples from the shared sync pulse to the first recorded
+   sample (header bytes 60-63); subtract across devices to align streams — FORMAT.md §10.
+   Returns 1 on success. */
+uint8_t REC_Open(const uint8_t ads_regs[10], uint8_t synced, uint32_t sync_lead_samples);
 
 /* Install the 8-byte per-session AES-GCM nonce prefix (entropy salt from the
    analog front-end; see FORMAT.md §6) and rewrite it into the file header.

@@ -434,7 +434,7 @@ static uint8_t find_free_session(char emgx_name[13], char csv_name[13])
     return 0;
 }
 
-uint8_t REC_Open(const uint8_t ads_regs[10])
+uint8_t REC_Open(const uint8_t ads_regs[10], uint8_t synced, uint32_t sync_lead_samples)
 {
     char emgx_name[13], csv_name[13];
     if (!find_free_session(emgx_name, csv_name)) return 0;
@@ -472,10 +472,13 @@ uint8_t REC_Open(const uint8_t ads_regs[10])
     hdr[36] = REC_KEY_VERSION;
     hdr[37] = NONCE_SCHEME_ENTROPY;
     hdr[38] = EMG_PGA_GAIN;
-    /* byte 39 reserved (0): payload_type is the sole chunk-layout discriminator */
+    hdr[39] = synced ? 1 : 0;   /* multi-device sync flag (FORMAT.md §10) */
     memcpy(hdr + 40, s_nonce_prefix, 8);
     memcpy(hdr + 48, ads_regs, 10);
     put_u16(hdr + 58, EMG_REF_MV);
+    /* bytes 60-63: EMG samples from the shared sync pulse to the first recorded
+       sample; subtract across devices to align their streams (0 if not synced) */
+    put_u32(hdr + 60, synced ? sync_lead_samples : 0);
 
     UINT bw;
     FRESULT fr = f_write(&s_emgx, hdr, sizeof(hdr), &bw);

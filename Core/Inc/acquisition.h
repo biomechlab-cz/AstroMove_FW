@@ -3,10 +3,25 @@
 
 #include <stdint.h>
 
-/* Init: SD 4-bit ~470 kHz, mount, snapshot ADS registers, open the
-   recording session (SNNNNNNN.EMX + .CSV — see recording.h).
+/* Init: DWT counter, SD 4-bit ~470 kHz, mount, snapshot ADS registers.
+   Does NOT open the session — call ACQ_OpenSession() after the sync sequence.
    Call before ADS1292_StartContinuous(). Returns 1 on success. */
 uint8_t ACQ_Init(void);
+
+/* Create the recording session files and write the header (see recording.h),
+   after the sync sequence. synced = 1 if a multi-device sync pulse was latched;
+   sync_lead_samples = EMG samples from the shared sync pulse to the first recorded
+   sample (subtract across devices to align — FORMAT.md §10). Returns 1 on success. */
+uint8_t ACQ_OpenSession(uint8_t synced, uint32_t sync_lead_samples);
+
+/* Drop everything sampled so far (the sync-wait samples) and clear the drop
+   counter so recording starts clean. Returns the sample index at the reset —
+   the absolute index of (about) the first recorded sample. */
+uint32_t ACQ_ResetRing(void);
+
+/* Free-running count of valid EMG conversions since power-up — the sample
+   timeline the sync sequence latches on (see g_sample_index in acquisition.c). */
+uint32_t ACQ_SampleIndex(void);
 
 /* Seed the AES-GCM nonce salt from analog front-end noise (FORMAT.md §6).
    Call after ADS1292_StartContinuous() and before the DRDY EXTI is armed —

@@ -27,6 +27,12 @@
  *   WARN             double-blink every 1.5 s     amber     recoverable/noisy signal issue
  *   FAULT_STORAGE    triple-blink burst           red       SD / write failure (fatal)
  *   FAULT_INIT       ~6 Hz frantic blink          red       no card / mount failed (fatal)
+ *   SYNC             solid                        magenta   multi-device sync: cable in,
+ *                                                           syncing — do NOT unplug yet
+ *                                                           (mono: solid, not a blink, so it
+ *                                                            reads clearly vs the winking
+ *                                                            RECORDING; transition solid→wink
+ *                                                            = recording started)
  * ------------------------------------------------------------------------- */
 
 #define LED_HW_RGB        0
@@ -41,6 +47,8 @@ typedef enum {
     LED_WARN,            /* acquiring, recoverable/noisy issue logged */
     LED_FAULT_STORAGE,   /* unrecoverable SD / recording error (fatal) */
     LED_FAULT_INIT,      /* init failed: no card, mount or session-open failure (fatal) */
+    LED_SYNC,            /* multi-device sync in progress: cable in, do not unplug yet
+                            (appended last so the SWD s_state values above stay stable) */
     LED_STATE_COUNT
 } LED_State;
 

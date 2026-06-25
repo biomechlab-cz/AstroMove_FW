@@ -19,8 +19,8 @@ STM32L462RETx (LQFP64), **16 MHz HSI** (PLL disabled in current firmware), STM32
 | GPIO in  | PB12 | SD_DET — card detect |
 | GPIO in  | PC0  | ADS_SPI_INT — interrupt |
 | GPIO out | PC1  | ADS_SPI_CS — chip select |
-| GPIO     | PC6  | SYNC_A (TBD) |
-| GPIO     | PC7  | SYNC_B (TBD) |
+| GPIO     | PC6  | SYNC_A — shared open-drain multi-device sync signal (sync.c) |
+| GPIO     | PC7  | SYNC_B — sync-cable presence (LOW = cable in) |
 
 Disabled in main.c (not yet needed): QUADSPI, USB, I2C2.  
 I2C2 permanently disabled — PB11 repurposed as TPS_ON GPIO.
@@ -51,6 +51,7 @@ Single LED on PB10 today, written RGB-ready (set `LED_HW_RGB=1` + wire 3 pins la
 | WARN | double-blink / 1.5 s | amber | dropped samples (held 3 s) |
 | FAULT_STORAGE | triple-blink burst | red | unrecoverable SD/record error (latches, spins) |
 | FAULT_INIT | ~6 Hz frantic | red | SD missing / mount / session-open fail (latches) |
+| SYNC | **solid** | magenta | multi-device sync: cable in, syncing — do not unplug yet. Mono: solid (not a blink) so it's unmistakable vs the winking RECORDING; solid→wink = recording started. (enum appended last so SWD `s_state` values 2/3/5 stay stable) |
 
 - The ISR builds a normalized lead-off status byte via `ADS1292_NORMALIZE_STATUS` (ads1292.h); `g_leadoff_active` = `status & ADS1292_STATUS_CH1_LEADOFF`. This path is currently inert (HW comparators off, see ADS row) — the live LEADOFF indication comes from the **signal-based** detector in `analyze_signal_quality` (acquisition.c): a 1 s chunk whose sum-of-abs-sample-differences is **below** `QUALITY_LEADOFF_DIFF_SUM_COUNTS` (quiet/open electrode) **or above** `QUALITY_LEADOFF_HI_DIFF_SUM_COUNTS` (wild/floating electrode — see [[astromove-leadoff-two-signatures]]), but isn't flat, sets `bad_contact` → `s_bad_signal_on` → `LED_LEADOFF`, and increments `ch1_leadoff_chunks` in the CSV. Connected EMG sits in the band between the two thresholds. **Both thresholds calibrated in a mains environment — re-tune for battery** (`samples/_leadoff_perchunk.py`). If the HW comparators are re-enabled, verify raw bit positions via the sticky-OR debug globals `g_stat0_or`/`g_stat1_or`. IMU/mag I2C failures are **not** on the LED (ISM330 is dead on board 04 → would mask everything).
 - Verified on board 04 over SWD: RECORDING (`s_state`=2) when CH1 connected, LEADOFF (`s_state`=3) when forced, FAULT_STORAGE (`s_state`=5) rendered correctly.
@@ -65,9 +66,9 @@ Single LED on PB10 today, written RGB-ready (set `LED_HW_RGB=1` + wire 3 pins la
 - Key: `recording.key` (repo root, **placeholder test key** — replace before deployment); CMake generates `recording_key.h` from it at configure time, `decode_emgx.py` reads it directly
 - Files per session: `SNNNNNNN.EMX` + `SNNNNNNN.CSV` (8.3 names — FatFS `_USE_LFN=0`; enable LFN in CubeMX for the spec's `SESSION_NNNNNNN.emgx`)
 - Desktop decoder: `decode_emgx.py` (needs `pip install cryptography`)
-- GCM nonce = 8-byte per-session salt (`nonce_scheme=1`, entropy from ADS analog noise via `ACQ_SeedNonce`) + batch index. Cross-session uniqueness no longer depends on the RTC (the old time+id scheme is `nonce_scheme=0`, now obsolete)
+- GCM nonce = 8-byte per-session salt (`nonce_scheme=1`, entropy from ADS analog noise via `ACQ_SeedNonce`) + batch index. Cross-session uniqueness does not depend on the RTC or on monotonic session ids.
 - IMU recorded at 100 Hz (payload type 2): accel+gyro int16 (ISM330, currently zeros — chip not responding) + mag 18-bit uint32 (MMC5983 continuous mode); IMU slots derived from the EMG sample clock (every 10th sample) so counts are exact; sample-and-hold across blocking writes and on I2C failure (`g_ism_fail_count`/`g_mag_fail_count`)
-- EMG = ADS ch1 int32 only; per-sample lead-off status is **not** stored — the LED gives live feedback and each batch's CH1 quality summary goes to the control CSV: `ch1_saturated_samples`, then the mutually-exclusive per-chunk states `ch1_flatline_chunks` → `ch1_leadoff_chunks` (signal-based, the live indicator) → `ch1_baseline_drift_chunks`, plus the continuous level metric `ch1_diff_abs_sum_min/med/max` (lets thresholds be re-tuned from the CSV without decoding the EMX — see FORMAT.md §8). The dead `ch1_leadoff_samples` (HW comparator, always 0) and redundant `ch1_quality_flags` columns were removed 2026-06-22. Chunk = ch1[1000] + imu[100] = 6400 B; `payload_type=2` alone identifies the layout (old raw-status recordings reused 2 and simply fail to decode)
+- EMG = ADS ch1 int32 only; per-sample lead-off status is **not** stored — the LED gives live feedback and each batch's CH1 quality summary goes to the control CSV: `ch1_saturated_samples`, then the mutually-exclusive per-chunk states `ch1_flatline_chunks` → `ch1_leadoff_chunks` (signal-based, the live indicator) → `ch1_baseline_drift_chunks`, plus the continuous level metric `ch1_diff_abs_sum_min/med/max` (lets thresholds be re-tuned from the CSV without decoding the EMX — see FORMAT.md §8). Do not re-add hardware-comparator sample-count columns or an aggregate quality bitmask unless the firmware and spec are intentionally redesigned. Chunk = ch1[1000] + imu[100] = 6400 B; `payload_type=2` identifies the layout.
 
 ## Board 04 quirks found 2026-06-10/11
 - **BOOT0 pin reads high** — option bytes set to `nSWBOOT0=0, nBOOT0=1` (always boot main flash, BOOT0 pin ignored). Without this the MCU boots into the ROM bootloader and the firmware never runs. Re-apply after any full chip erase / option-byte reset.
@@ -82,7 +83,14 @@ Single LED on PB10 today, written RGB-ready (set `LED_HW_RGB=1` + wire 3 pins la
 - DRDY ISR reads the frame itself (`ADS1292_ReadRawFast` — direct-register SPI, ~40 µs; HAL version is ~240 µs and starves SDMMC) into a 1024-sample ring; main loop drains ring → encrypt → SD write. `dropped_samples` in the control CSV = ring overflow only (expected 0).
 - SPI1 runs 500 kHz for ADS commands/registers (inter-byte decode time), switched to 4 MHz after RDATAC for data-phase reads (main.c).
 - EXTI0 must be armed only **after** `ADS1292_StartContinuous()` — the ISR's SPI reads must never overlap main-thread SPI.
-- Debug globals readable over SWD: `g_isr_count/g_spurious_count/g_dropped_count/g_isr_max_cycles` (acquisition.c), `g_rec_fail_point/code` (recording.c), `g_sd_retry_count/g_sd_fail_count/g_sd_last_stage/g_sd_last_err` (sd_diskio.c).
+- Debug globals readable over SWD: `g_isr_count/g_spurious_count/g_dropped_count/g_isr_max_cycles/g_sample_index` (acquisition.c), `g_rec_fail_point/code` (recording.c), `g_sd_retry_count/g_sd_fail_count/g_sd_last_stage/g_sd_last_err` (sd_diskio.c).
+
+## Multi-device sync (`Core/Src/sync.c`, FORMAT.md §10, sync_protocol.md)
+- Synchronizes N devices' EMG sample clocks over a shared bus: **PC6 (Sync A)** = shared **open-drain** signal net (wired-AND, any device pulls low → all see the edge simultaneously); **PC7 (Sync B)** = presence (LOW = cable in). The shared electrical edge — not a mechanical unplug — is the only simultaneous event across devices.
+- `SYNC_Run()` runs in `main.c` **after** EXTI0 is armed (so `g_sample_index` is ticking) and **before** the session opens. Boot order changed: `ACQ_Init()` now only does SD-mount + ADS-reg snapshot; the session is opened by **`ACQ_OpenSession(synced, sync_lead)`** after sync. The documented orderings (reg snapshot before RDATAC, `SeedNonce` before EXTI, SPI 500 k→4 M) are preserved.
+- Each device emits one pulse, then re-latches `g_sample_index` (and zeroes the RTC, coarse) on every PC6 edge **until it is unplugged**; the last edge is common to all devices still on the bus. On unplug: `ACQ_ResetRing()` (discard sync-wait samples) → record. Header stores `synced` (byte 39) + `sync_lead_samples` (bytes 60-63) = samples from the pulse to the first recorded sample; subtract across devices to align (FORMAT.md §10).
+- Each device staggers its pulse by a UID-derived delay (`SYNC_PULSE_STAGGER_MS`, 0–511 ms) so devices booting together off one power source don't pulse simultaneously (coincident pulses merge on the wired-AND line → no distinct peer edge observed). The last (separated) pulse is the common edge everyone latches.
+- **Operational rule:** connect the cable **before** power-on (sync is boot-only — plugging into a running device does nothing), power all devices on together, and don't unplug any until all show **solid** `LED_SYNC` — an early unplug freezes on an earlier pulse. Sample-accurate (sub-ms); RTC zero is the ~1 s fallback. Sync only reconfigures PC6/PC7 by pin (PC0 DRDY / PC1 CS untouched). No cable at boot → `synced=0`, records standalone. NB: on the **mono** LED, SYNC is **solid** and RECORDING is the wink — watch for the solid→wink transition at unplug.
 
 ## SD card config notes
 - **4-bit ~470 kHz validated** — `sd_init_4bit()` in `Core/Src/acquisition.c`; see BOARD_SETUP.md §6 for full findings

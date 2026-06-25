@@ -12,10 +12,6 @@ IMU CSV columns:  imu_index, batch_index, ax, ay, az, gx, gy, gz, mx, my, mz
 Per-sample lead-off status is not stored; the control CSV's per-batch
 signal-quality columns (ch1_leadoff_chunks etc.) carry the summary instead.
 
-Older development recordings are an obsolete, incompatible format: the early
-raw-status recordings reused payload type 2 and fail to decode (their chunk size
-differs), and the pre-BATC files have no batch markers.
-
 Usage:
     python decode_emgx.py S0000001.EMX
     python decode_emgx.py S0000001.EMX --key 000102...1f -o out.csv
@@ -47,7 +43,6 @@ CHUNK_EMG_BYTES = CHUNK_SAMPLES * 4    # int32 ch1 per sample (no status byte)
 IMU_SAMPLES = 100              # IMU samples per chunk
 IMU_STRUCT = struct.Struct("<6h3I")    # ax,ay,az,gx,gy,gz, mx,my,mz (24 B)
 CHUNK_BYTES = CHUNK_EMG_BYTES + IMU_SAMPLES * IMU_STRUCT.size  # 6400
-OBSOLETE_CHUNK_BYTES = CHUNK_EMG_BYTES + CHUNK_SAMPLES + IMU_SAMPLES * IMU_STRUCT.size  # 7400
 
 
 def load_key_file(path):
@@ -74,7 +69,7 @@ def parse_file_header(h):
         sys.exit("Not an EMGX file (bad magic)")
     version = h[4]
     if version != FORMAT_VERSION:
-        sys.exit(f"Incompatible/obsolete EMGX format version {version} "
+        sys.exit(f"Unsupported EMGX format version {version} "
                  f"(this decoder reads v{FORMAT_VERSION} only; see FORMAT.md)")
     info = {
         "version": version,
@@ -91,16 +86,17 @@ def parse_file_header(h):
         "key_version": h[36],
         "nonce_scheme": h[37],
         "emg_pga_gain": h[38],
+        "synced": h[39],                                       # 1 = multi-device synced (FORMAT.md §10)
         "nonce_prefix": h[40:48].hex(),
         "ads_regs": h[48:58].hex(),
         "emg_ref_mv": struct.unpack_from("<H", h, 58)[0],
+        "sync_lead_samples": struct.unpack_from("<I", h, 60)[0],  # samples from sync pulse to first sample
     }
     if info["cipher_id"] != CIPHER_AES256GCM:
         sys.exit(f"Unsupported cipher id {info['cipher_id']} (expected 1 = AES-256-GCM)")
     if info["payload_type"] != PAYLOAD_TYPE:
         sys.exit(f"Unsupported payload type {info['payload_type']} (expected {PAYLOAD_TYPE} "
-                 f"= EMG ch1 + IMU; obsolete raw-status recordings reused payload type 2 "
-                 f"and will not decode â€” see FORMAT.md)")
+                 f"= EMG ch1 + IMU; see FORMAT.md)")
     return info
 
 
@@ -113,7 +109,7 @@ def emg_uv(counts, ref_mv, gain):
 
 def ensure_batch_markers(data):
     if len(data) > FILE_HEADER_SIZE and data.find(b"BATC", FILE_HEADER_SIZE) < 0:
-        sys.exit("Obsolete/incompatible pre-BATC recording: no BATC batch markers found")
+        sys.exit("Unsupported EMGX recording: no BATC batch markers found")
 
 
 def decode_batches(data, key, csv_out, imu_out):
@@ -164,13 +160,10 @@ def decode_batches(data, key, csv_out, imu_out):
         if zlib.crc32(pt) != crc_stored:
             status_notes.append("CRC MISMATCH")
         if len(pt) % CHUNK_BYTES:
-            if len(pt) % OBSOLETE_CHUNK_BYTES == 0:
-                print(f"  batch {batch_index}: obsolete 7400 B payload-type-2 chunk layout, discarded")
-            else:
-                print(
-                    f"  batch {batch_index}: invalid plaintext length {len(pt)} B "
-                    f"(expected multiple of {CHUNK_BYTES}), discarded"
-                )
+            print(
+                f"  batch {batch_index}: invalid plaintext length {len(pt)} B "
+                f"(expected multiple of {CHUNK_BYTES}), discarded"
+            )
             n_bad += 1
             pos = end
             continue
@@ -214,7 +207,7 @@ def main():
         sys.exit("File too short")
     info = parse_file_header(data[:FILE_HEADER_SIZE])
 
-    nonce_scheme = {0: "legacy time+id", 1: "entropy salt"}.get(
+    nonce_scheme = {0: "time+id", 1: "entropy salt"}.get(
         info["nonce_scheme"], f"unknown({info['nonce_scheme']})")
     print(f"Session {info['session_id']}, started {info['start_time']}, "
           f"EMG {info['emg_rate_hz']} Hz, IMU {info['imu_rate_hz']} Hz, "
@@ -222,6 +215,11 @@ def main():
     print(f"Key id {info['key_id']} v{info['key_version']}, nonce {nonce_scheme}, "
           f"EMG gain {info['emg_pga_gain']} @ {info['emg_ref_mv']} mV ref, "
           f"ADS regs {info['ads_regs']}")
+    if info["synced"]:
+        print(f"Multi-device sync: ON — sync_lead_samples={info['sync_lead_samples']} "
+              f"(align peers on sample k + sync_lead_samples; see FORMAT.md §10)")
+    else:
+        print("Multi-device sync: off (standalone session)")
 
     ensure_batch_markers(data)
 
@@ -239,4 +237,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

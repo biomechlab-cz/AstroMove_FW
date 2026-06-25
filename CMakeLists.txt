@@ -66,6 +66,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/acquisition.c
     Core/Src/recording.c
     Core/Src/led.c
+    Core/Src/sync.c
 )
 
 # Add include paths

@@ -24,6 +24,7 @@ static const led_pattern_t PATTERNS[LED_STATE_COUNT] = {
     [LED_WARN]          = { 1500,  90, 160, 2, 1, 1, 0 },  /* double-blink (amber)    */
     [LED_FAULT_STORAGE] = { 1200, 110, 160, 3, 1, 0, 0 },  /* triple burst (red)      */
     [LED_FAULT_INIT]    = {  160,  80,   0, 1, 1, 0, 0 },  /* ~6 Hz frantic (red)     */
+    [LED_SYNC]          = {  500, 500,   0, 1, 1, 0, 1 },  /* SOLID (magenta) — mono: not a blink, so it's unmistakable vs the winking RECORDING; "hold, do not unplug" */
 };
 
 static volatile LED_State s_state    = LED_BOOT;
