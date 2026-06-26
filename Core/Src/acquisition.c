@@ -119,6 +119,9 @@ volatile uint32_t g_sample_index = 0;      /* free-running count of valid conver
                                               the EMG sample timeline used for multi-device
                                               sync latching (counts dropped samples too) */
 static uint16_t   g_sync_seed = 0;         /* per-session entropy for the sync group-id (sync.c) */
+static uint8_t    s_nonce_salt[8];         /* per-session AES-GCM nonce salt; gathered by
+                                              ACQ_SeedNonce(), installed by ACQ_OpenSession()
+                                              AFTER REC_Open() (session not open during SeedNonce) */
 
 /* Live lead-off (status LED). Asserted after LEADOFF_DEBOUNCE consecutive
    samples with a CH1 electrode off, cleared on the first good sample.
@@ -348,15 +351,17 @@ void ACQ_SeedNonce(void)
         HAL_Delay(1);                          /* ~one conversion period for a fresh sample */
     }
 
-    uint8_t salt[8];
+    /* Stash the salt — it is installed into the header by ACQ_OpenSession() after
+       REC_Open() opens the session. We CANNOT call REC_SetNonceSalt() here: this
+       runs before the sync sequence, so the session is not open yet and the salt
+       would be silently dropped (which previously left the nonce = device UID). */
     for (int i = 0; i < 8; i++)
-        salt[i] = (uint8_t)(h >> (8 * i));
-    REC_SetNonceSalt(salt);
+        s_nonce_salt[i] = (uint8_t)(h >> (8 * i));
 
     /* Per-session 16-bit seed for the multi-device sync group-id (sync.c). Same
        analog entropy, so it differs every session; forced nonzero so 0 can mean
        "no group id". */
-    g_sync_seed = (uint16_t)((salt[2] << 8) | salt[3]);
+    g_sync_seed = (uint16_t)((s_nonce_salt[2] << 8) | s_nonce_salt[3]);
     if (g_sync_seed == 0) g_sync_seed = 0xA5A5;
 }
 /* ADS register snapshot taken in ACQ_Init() (SDATAC mode), held until the
@@ -396,7 +401,13 @@ uint8_t ACQ_Init(void)
    first recorded sample (subtract across devices to align streams — FORMAT.md §10). */
 uint8_t ACQ_OpenSession(uint8_t synced, uint32_t sync_lead_samples, uint16_t group_id)
 {
-    return REC_Open(s_ads_regs, synced, sync_lead_samples, group_id);
+    if (!REC_Open(s_ads_regs, synced, sync_lead_samples, group_id))
+        return 0;
+    /* Now that the session is open, install the entropy salt gathered by
+       ACQ_SeedNonce() — this rewrites the header nonce_prefix from the UID
+       placeholder to the per-session salt (FORMAT.md §6). */
+    REC_SetNonceSalt(s_nonce_salt);
+    return 1;
 }
 
 /* Discard everything sampled so far (e.g. during the sync wait) and clear the
