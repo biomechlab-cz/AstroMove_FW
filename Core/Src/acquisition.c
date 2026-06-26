@@ -118,6 +118,7 @@ volatile uint32_t g_isr_max_cycles = 0;    /* worst-case ISR duration (debug) */
 volatile uint32_t g_sample_index = 0;      /* free-running count of valid conversions —
                                               the EMG sample timeline used for multi-device
                                               sync latching (counts dropped samples too) */
+static uint16_t   g_sync_seed = 0;         /* per-session entropy for the sync group-id (sync.c) */
 
 /* Live lead-off (status LED). Asserted after LEADOFF_DEBOUNCE consecutive
    samples with a CH1 electrode off, cleared on the first good sample.
@@ -351,6 +352,12 @@ void ACQ_SeedNonce(void)
     for (int i = 0; i < 8; i++)
         salt[i] = (uint8_t)(h >> (8 * i));
     REC_SetNonceSalt(salt);
+
+    /* Per-session 16-bit seed for the multi-device sync group-id (sync.c). Same
+       analog entropy, so it differs every session; forced nonzero so 0 can mean
+       "no group id". */
+    g_sync_seed = (uint16_t)((salt[2] << 8) | salt[3]);
+    if (g_sync_seed == 0) g_sync_seed = 0xA5A5;
 }
 /* ADS register snapshot taken in ACQ_Init() (SDATAC mode), held until the
    session is opened by ACQ_OpenSession() after the sync sequence has run. */
@@ -387,9 +394,9 @@ uint8_t ACQ_Init(void)
    the sync result. synced = 1 if a multi-device sync pulse was latched this
    power-up; sync_lead_samples = EMG samples from the shared sync pulse to the
    first recorded sample (subtract across devices to align streams — FORMAT.md §10). */
-uint8_t ACQ_OpenSession(uint8_t synced, uint32_t sync_lead_samples)
+uint8_t ACQ_OpenSession(uint8_t synced, uint32_t sync_lead_samples, uint16_t group_id)
 {
-    return REC_Open(s_ads_regs, synced, sync_lead_samples);
+    return REC_Open(s_ads_regs, synced, sync_lead_samples, group_id);
 }
 
 /* Discard everything sampled so far (e.g. during the sync wait) and clear the
@@ -411,6 +418,13 @@ uint32_t ACQ_ResetRing(void)
 uint32_t ACQ_SampleIndex(void)
 {
     return g_sample_index;
+}
+
+/* Per-session 16-bit entropy seed for the multi-device sync group-id (set by
+   ACQ_SeedNonce from the ADS analog noise; nonzero). */
+uint16_t ACQ_SyncSeed(void)
+{
+    return g_sync_seed;
 }
 
 void ACQ_Process(void)

@@ -49,8 +49,11 @@ typedef struct {
    synced: 1 if a multi-device sync pulse was latched this power-up (header byte 39).
    sync_lead_samples: EMG samples from the shared sync pulse to the first recorded
    sample (header bytes 60-63); subtract across devices to align streams — FORMAT.md §10.
+   group_id: shared 16-bit session id agreed on the sync bus (0 if none); written to
+   the control CSV so the Inspector can pair cards from one synchronized run.
    Returns 1 on success. */
-uint8_t REC_Open(const uint8_t ads_regs[10], uint8_t synced, uint32_t sync_lead_samples);
+uint8_t REC_Open(const uint8_t ads_regs[10], uint8_t synced, uint32_t sync_lead_samples,
+                 uint16_t group_id);
 
 /* Install the 8-byte per-session AES-GCM nonce prefix (entropy salt from the
    analog front-end; see FORMAT.md §6) and rewrite it into the file header.

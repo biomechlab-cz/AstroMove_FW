@@ -152,7 +152,8 @@ session_id,batch_index,start_timestamp,end_timestamp,emg_sample_count,
 imu_sample_count,payload_bytes,write_time_ms,crc32_plaintext,
 dropped_samples,temperature_c,error_flags,storage_status,
 ch1_saturated_samples,ch1_flatline_chunks,ch1_baseline_drift_chunks,
-ch1_leadoff_chunks,ch1_diff_abs_sum_min,ch1_diff_abs_sum_med,ch1_diff_abs_sum_max
+ch1_leadoff_chunks,ch1_diff_abs_sum_min,ch1_diff_abs_sum_med,ch1_diff_abs_sum_max,
+group_id
 ```
 
 Readers must key columns by **header name** and tolerate columns being added/removed
@@ -191,6 +192,10 @@ priority): **flatline → lead-off → baseline-drift → clean**.
   thresholds re-tunable from the CSV alone (no EMX decode) and exposes signal magnitude:
   quiet float ≈ hundreds of k, connected EMG ≈ low millions, wild float ≈ tens of M
   (mains environment — all shift on battery). Clamped to 32-bit.
+- `group_id`: 16-bit shared session id agreed on the sync bus (§10.4); **constant for
+  every row of a session**, like `session_id`. All cards from one synchronized run carry
+  the **same** `group_id`, so a reader pairs them by equal `group_id` without decrypting.
+  `0` = standalone / not synced (fall back to heuristic grouping).
 
 ## 9. Physical scaling (for analysis / ML)
 
@@ -271,6 +276,27 @@ set of files:
 Precision is one shared electrical edge latched in firmware per device — sample-
 accurate to within each device's pulse-detection latency (sub-millisecond), i.e. ≪
 one EMG sample at 1 kHz. The RTC zero (`start_time_bcd`) is only a coarse fallback.
+
+### 10.4 Pairing cards — `group_id`
+
+Alignment (§10.3) tells you how to line streams up *once you know they belong together*;
+`group_id` tells you *which files belong together*. Each card numbers its own sessions
+independently, so the filenames don't pair — instead every card from one synchronized
+run carries the same **`group_id`** in its control CSV (§8).
+
+How it is agreed (full handshake in `SYNC_PROTOCOL.md`): once the bus is quiet (all
+devices armed), the **leader** — the device whose UID stagger was shortest — broadcasts
+a 16-bit id on the shared PC6 net as a framed packet (a long start marker, distinct from
+the sample pulse, then 16 id bits + an 8-bit checksum, repeated a few times). Every
+device decodes it and writes it to `group_id`. The id is drawn from the leader's
+per-session analog-noise entropy, so it differs every run (distinguishes back-to-back
+group recordings). A second self-elected leader (only if two staggers tie) is detected by
+bus read-back and collapses the id to `0`.
+
+Reader: **group files by equal non-zero `group_id`** (plaintext — no decryption needed),
+then align within the group via §10.3. `group_id = 0` means standalone or a failed
+exchange → fall back to heuristic grouping (distinct `device_uid`, equal `emg_rate_hz`,
+`synced == 1`, close `start_time_bcd`).
 
 ## 11. Versioning policy
 

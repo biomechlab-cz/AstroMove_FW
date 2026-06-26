@@ -189,8 +189,8 @@ int main(void)
   uint32_t sync_lead = sync.synced ? (rec_start_idx - sync.pulse_index) : 0;
 
   /* Open the session now — the header captures the synced RTC start time and the
-     sync result (synced flag + sync_lead). */
-  if (!ACQ_OpenSession(sync.synced, sync_lead)) {
+     sync result (synced flag + sync_lead); group_id goes to the control CSV. */
+  if (!ACQ_OpenSession(sync.synced, sync_lead, sync.group_id)) {
       LED_SetState(LED_FAULT_INIT);   /* fatal: SysTick blinks the fault pattern */
       while (1) { }
   }

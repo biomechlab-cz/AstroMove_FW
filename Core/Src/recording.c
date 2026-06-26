@@ -72,6 +72,7 @@ static FIL      s_emgx;
 static FIL      s_csv;
 static uint8_t  s_open = 0;
 static uint32_t s_session_id;
+static uint16_t s_group_id;     /* shared multi-device sync session id (0 = none) — CSV only */
 static uint8_t  s_nonce_prefix[8];
 
 /* ---- current batch state ---- */
@@ -342,7 +343,7 @@ static void rec_append_csv_row(void)
 
     char row[256];
     int len = snprintf(row, sizeof(row),
-        "%lu,%lu,%s,%s,%lu,%lu,%lu,%lu,%08lX,%lu,%s,0x%02X,%s,%lu,%lu,%lu,%lu,%lu,%lu,%lu\r\n",
+        "%lu,%lu,%s,%s,%lu,%lu,%lu,%lu,%08lX,%lu,%s,0x%02X,%s,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\r\n",
         (unsigned long)s_session_id,
         (unsigned long)s_batch_index,
         ts_start, ts_end,
@@ -361,7 +362,8 @@ static void rec_append_csv_row(void)
         (unsigned long)s_leadoff_chunks,
         (unsigned long)d_min,
         (unsigned long)d_med,
-        (unsigned long)d_max);
+        (unsigned long)d_max,
+        (unsigned long)s_group_id);
 
     UINT bw;
     f_write(&s_csv, row, (UINT)len, &bw);
@@ -434,9 +436,11 @@ static uint8_t find_free_session(char emgx_name[13], char csv_name[13])
     return 0;
 }
 
-uint8_t REC_Open(const uint8_t ads_regs[10], uint8_t synced, uint32_t sync_lead_samples)
+uint8_t REC_Open(const uint8_t ads_regs[10], uint8_t synced, uint32_t sync_lead_samples,
+                 uint16_t group_id)
 {
     char emgx_name[13], csv_name[13];
+    s_group_id = group_id;
     if (!find_free_session(emgx_name, csv_name)) return 0;
     if (f_open(&s_emgx, emgx_name, FA_CREATE_NEW | FA_WRITE) != FR_OK) return 0;
     if (f_open(&s_csv, csv_name, FA_CREATE_NEW | FA_WRITE) != FR_OK) {
@@ -499,7 +503,7 @@ uint8_t REC_Open(const uint8_t ads_regs[10], uint8_t synced, uint32_t sync_lead_
         "dropped_samples,temperature_c,error_flags,storage_status,"
         "ch1_saturated_samples,ch1_flatline_chunks,ch1_baseline_drift_chunks,"
         "ch1_leadoff_chunks,ch1_diff_abs_sum_min,ch1_diff_abs_sum_med,"
-        "ch1_diff_abs_sum_max\r\n";
+        "ch1_diff_abs_sum_max,group_id\r\n";
     fr = f_write(&s_csv, csv_header, sizeof(csv_header) - 1, &bw);
     if (fr == FR_OK)
         fr = f_sync(&s_csv);

@@ -179,9 +179,10 @@ def main():
         end_b = bcd_str(bcd_time(b * 10 + 10))
         # saturated/flatline/baseline-drift never trip for this synthetic signal;
         # leadoff + the level columns are derived from the actual diff_abs_sum.
+        # group_id = 0: this synthetic golden is a standalone (un-synced) session.
         rows.append(f"{args.session},{b},{start_b},{end_b},{10*fmt.CHUNK_SAMPLES},"
                     f"{10*fmt.IMU_SAMPLES},{len(payload)},0,{crc:08X},0,25.3,0x00,OK,"
-                    f"0,0,0,{leadoff_chunks},{d_min},{d_med},{d_max}")
+                    f"0,0,0,{leadoff_chunks},{d_min},{d_med},{d_max},0")
 
     emx.write_bytes(out)
     csv_header = ("session_id,batch_index,start_timestamp,end_timestamp,emg_sample_count,"
@@ -189,7 +190,7 @@ def main():
                   "dropped_samples,temperature_c,error_flags,storage_status,"
                   "ch1_saturated_samples,ch1_flatline_chunks,ch1_baseline_drift_chunks,"
                   "ch1_leadoff_chunks,ch1_diff_abs_sum_min,ch1_diff_abs_sum_med,"
-                  "ch1_diff_abs_sum_max")
+                  "ch1_diff_abs_sum_max,group_id")
     csv.write_text(csv_header + "\n" + "\n".join(rows) + "\n")
     print(f"{emx.name}: {args.batches} batches, {args.batches*10*fmt.CHUNK_SAMPLES} EMG / "
           f"{args.batches*10*fmt.IMU_SAMPLES} IMU samples, {len(out)} bytes  (+ {csv.name})")
