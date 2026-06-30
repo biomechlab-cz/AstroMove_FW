@@ -31,7 +31,9 @@
 #define SYNC_B_PIN  GPIO_PIN_7   /* Sync B — presence (LOW = cable present) */
 
 #define SYNC_PULSE_LOW_MS     20   /* sample-sync announce pulse — short */
-#define SYNC_PULSE_STAGGER_MS 512  /* max per-device pulse delay (from the UID). Spreads the
+#define SYNC_PULSE_STAGGER_MS 512  /* max per-device pulse delay, computed by uid_stagger_ms()
+                                      (FNV-1a hash of the full UID, so same-wafer boards that share
+                                      the low UID bits still get distinct delays). Spreads the
                                       announce pulses so devices booting together off one power
                                       source don't collide, and elects the shortest-stagger device
                                       as the group-id leader. */
@@ -161,6 +163,22 @@ static int decode_gid_frame(uint32_t rise_cyc, uint16_t *out)
     return 1;
 }
 
+/* Per-device pulse-stagger delay in ms (0 .. SYNC_PULSE_STAGGER_MS-1), derived from the
+   full 96-bit unique id via FNV-1a. Using all 12 UID bytes — not HAL_GetUIDw0() % N —
+   matters because devices from the same wafer/lot share the low UID bits: with the old
+   w0 % 512, two such boards got the SAME stagger, tied for shortest, both self-elected as
+   group-id leader, and their broadcasts collided (id collapses to 0). Hashing the whole
+   UID gives them distinct staggers, hence distinct leader priority. */
+static uint32_t uid_stagger_ms(void)
+{
+    const uint32_t w[3] = { HAL_GetUIDw0(), HAL_GetUIDw1(), HAL_GetUIDw2() };
+    uint32_t h = 2166136261u;            /* FNV-1a 32-bit offset basis */
+    for (int i = 0; i < 3; i++)
+        for (int s = 0; s < 32; s += 8)  /* low byte first */
+            h = (h ^ ((w[i] >> s) & 0xFFu)) * 16777619u;
+    return h % SYNC_PULSE_STAGGER_MS;
+}
+
 SYNC_Result SYNC_Run(void)
 {
     SYNC_Result r = { .synced = 0, .pulse_index = 0, .group_id = 0 };
@@ -179,7 +197,7 @@ SYNC_Result SYNC_Run(void)
     uint8_t  is_leader = 1;
     uint32_t cpm = SystemCoreClock / 1000;
     uint32_t s_start = DWT->CYCCNT;
-    uint32_t s_cyc = (HAL_GetUIDw0() % SYNC_PULSE_STAGGER_MS) * cpm;
+    uint32_t s_cyc = uid_stagger_ms() * cpm;
     while ((DWT->CYCCNT - s_start) < s_cyc) {
         if (line_low()) { is_leader = 0; break; }
     }

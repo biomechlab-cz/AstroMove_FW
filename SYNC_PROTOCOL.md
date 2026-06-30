@@ -102,8 +102,10 @@ sample pulse).
 
 - **Leader election** is implicit: a device that heard the line go low during its
   stagger is a **follower**; the one whose stagger elapsed with the line quiet (the
-  shortest stagger) is the **leader**. With simultaneous power-on the leader fires
-  while every other device is still staggering = listening, so all become followers.
+  shortest stagger) is the **leader**. The stagger is an FNV-1a hash of the **full 96-bit
+  UID**, so no two boards — even from the same wafer/lot, which share the low UID bits — tie
+  for shortest. With simultaneous power-on the leader fires while every other device is still
+  staggering = listening, so all become followers.
 - **Broadcast:** once the bus has been quiet for ~400 ms (all devices have emitted
   their announce pulse = all armed), the leader sends the **frame** — a ~60 ms start
   marker, then 16 id bits + an 8-bit checksum, NRZ at ~8 ms/bit — **three times**
@@ -111,8 +113,9 @@ sample pulse).
   per-session ADS analog-noise entropy (`ACQ_SyncSeed()`), so it differs every run.
 - **Receive:** followers (and the leader's own loop) classify the long start, sample
   the bits at their mid-points, verify the checksum, and store the id as `group_id`.
-- **Collision:** if two devices tie for shortest stagger and both lead, each reads the
-  bus back while driving a `1` bit; a mismatch means another driver → both abort and
+- **Collision (safety net):** ties for shortest stagger are now unlikely (the stagger is a
+  full-UID hash, not `w0 % 512`), but if two devices still coincide and both lead, each reads
+  the bus back while driving a `1` bit; a mismatch means another driver → both abort and
   `group_id` collapses to `0` (consistent across all → heuristic-pairing fallback).
 - `group_id` is written to the **control CSV** (plaintext), so the desktop tool pairs
   cards by equal `group_id` without decrypting (FORMAT.md §10.4).
@@ -126,9 +129,10 @@ sample pulse).
   (or power-cycle) the devices with the cable already attached.
 - **Power all devices on within the same window**, before any is unplugged. A device
   unplugged before the last peer has armed freezes on an earlier edge and is misaligned.
-  Each device staggers its own pulse by a UID-derived delay (`SYNC_PULSE_STAGGER_MS`),
-  so one shared power source / simultaneous power-on is fine — the pulses still separate
-  into a clean last edge.
+  Each device staggers its own pulse by a delay hashed (FNV-1a) from its **full 96-bit UID**
+  (`SYNC_PULSE_STAGGER_MS` max), so one shared power source / simultaneous power-on is fine —
+  the pulses still separate into a clean last edge, and even same-wafer boards (which share the
+  low UID bits) get distinct delays instead of tying.
 - The **SYNC LED** is **solid** (magenta on RGB) while the cable is present —
   *do not unplug until every device shows solid*, i.e. all have armed. When you unplug,
   the LED drops to the recording wink; that solid→wink transition is the "go" signal.
