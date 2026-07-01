@@ -205,7 +205,12 @@ The header carries everything needed to convert raw counts to physical units:
   (with `emg_ref_mv = 2420`, `emg_pga_gain = 4` → ≈ 0.0721 µV / count).
 - **Accelerometer:** `g = raw / 16384` (±2 g range).
 - **Gyroscope:** `dps = raw / 131` (±250 dps range).
-- **Magnetometer:** 18-bit unsigned; null-field (no field / not measuring) = `131072`.
+- **Magnetometer:** 18-bit unsigned, MMC5983MA (±8 G full scale, 16384 counts/G,
+  auto set/reset so the bridge offset is cancelled). Per axis:
+  `mag_uT = (raw - 131072) / 163.84` (equivalently `gauss = (raw - 131072) / 16384`,
+  ×100 → µT). Null-field (no field / not measuring) = `131072` (2^17), ≈ 6.1 nT/count,
+  range ±800 µT. This scale factor is nominal (few-% part tolerance); an accurate absolute
+  field/heading additionally needs hard-iron + soft-iron calibration.
 - **Time:** `t_emg[i] = i / emg_rate_hz`, `t_imu[i] = i / imu_rate_hz`.
 
 ## 10. Multi-device synchronization

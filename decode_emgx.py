@@ -7,7 +7,8 @@ plaintext CRC32, and exports samples to CSV: EMG to <input>_data.csv and IMU to
 
 EMG CSV columns:  sample_index, batch_index, ch1
   - ch1          raw 24-bit ADC counts, sign-extended (see FORMAT.md Â§9 for ÂµV)
-IMU CSV columns:  imu_index, batch_index, ax, ay, az, gx, gy, gz, mx, my, mz
+IMU CSV columns:  imu_index, batch_index, ax, ay, az, gx, gy, gz, mx, my, mz, mx_uT, my_uT, mz_uT
+  (mx/my/mz are raw 18-bit counts; mx_uT/my_uT/mz_uT are microtesla, FORMAT.md section 9)
 
 Per-sample lead-off status is not stored; the control CSV's per-batch
 signal-quality columns (ch1_leadoff_chunks etc.) carry the summary instead.
@@ -43,6 +44,11 @@ CHUNK_EMG_BYTES = CHUNK_SAMPLES * 4    # int32 ch1 per sample (no status byte)
 IMU_SAMPLES = 100              # IMU samples per chunk
 IMU_STRUCT = struct.Struct("<6h3I")    # ax,ay,az,gx,gy,gz, mx,my,mz (24 B)
 CHUNK_BYTES = CHUNK_EMG_BYTES + IMU_SAMPLES * IMU_STRUCT.size  # 6400
+
+# MMC5983MA magnetometer physical scaling (FORMAT.md section 9): 18-bit, +/-8 G,
+# 16384 counts/G, null (zero field) = 131072. 1 G = 100 uT, so uT = (raw-131072)*100/16384.
+MAG_NULL = 131072
+MAG_UT_PER_COUNT = 100.0 / 16384.0
 
 
 def load_key_file(path):
@@ -175,8 +181,10 @@ def decode_batches(data, key, csv_out, imu_out):
                 csv_out.write(f"{sample_index},{batch_index},{ch1[i]}\n")
                 sample_index += 1
             for s in IMU_STRUCT.iter_unpack(chunk[CHUNK_EMG_BYTES:]):
+                mag_uT = ((s[j] - MAG_NULL) * MAG_UT_PER_COUNT for j in (6, 7, 8))
                 imu_out.write(f"{imu_index},{batch_index},"
-                              + ",".join(str(v) for v in s) + "\n")
+                              + ",".join(str(v) for v in s)
+                              + "".join(f",{u:.4f}" for u in mag_uT) + "\n")
                 imu_index += 1
 
         n_ok += 1
@@ -228,7 +236,7 @@ def main():
     with open(out_path, "w", newline="") as csv_out, \
          open(imu_path, "w", newline="") as imu_out:
         csv_out.write("sample_index,batch_index,ch1\n")
-        imu_out.write("imu_index,batch_index,ax,ay,az,gx,gy,gz,mx,my,mz\n")
+        imu_out.write("imu_index,batch_index,ax,ay,az,gx,gy,gz,mx,my,mz,mx_uT,my_uT,mz_uT\n")
         n_ok, n_bad, n_samples, n_imu = decode_batches(data, key, csv_out, imu_out)
 
     print(f"Done: {n_ok} batches OK, {n_bad} failed, "
