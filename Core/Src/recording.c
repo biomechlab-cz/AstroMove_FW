@@ -55,7 +55,7 @@ _Static_assert(sizeof(REC_ImuSample) == 24, "REC_ImuSample is stored as-is");
 
 /* Debug (read over SWD): first FatFS failure since boot, never cleared.
    point: 1=open hdr write, 2=open hdr sync, 3=open csv, 4=batch hdr,
-   5=payload, 6=trailer, 7=batch sync */
+   5=payload, 6=trailer, 7=batch sync, 8=csv row write/sync */
 volatile uint32_t g_rec_fail_point = 0;
 volatile uint32_t g_rec_fail_code  = 0;
 
@@ -364,10 +364,15 @@ static void rec_append_csv_row(void)
         (unsigned long)d_med,
         (unsigned long)d_max,
         (unsigned long)s_group_id);
+    if (len < 0) return;                     /* encoding error — skip this row */
+    if (len > (int)sizeof(row) - 1)          /* snprintf truncated — never f_write past the buffer */
+        len = (int)sizeof(row) - 1;
 
     UINT bw;
-    f_write(&s_csv, row, (UINT)len, &bw);
-    f_sync(&s_csv);
+    FRESULT fw = f_write(&s_csv, row, (UINT)len, &bw);
+    FRESULT fs = (fw == FR_OK) ? f_sync(&s_csv) : fw;
+    if (fw != FR_OK || bw != (UINT)len || fs != FR_OK)
+        rec_note_failure(8, (fw != FR_OK) ? fw : fs);  /* CSV is diagnostic — record, don't halt */
 }
 
 static uint8_t rec_end_batch(void)
@@ -375,6 +380,9 @@ static uint8_t rec_end_batch(void)
     /* flush the final ciphertext block (if any) and get the tag */
     uint8_t tag[16];
     uint32_t flushed = gcm_finish(s_ct, tag, s_payload_bytes);
+    if (s_error_flags & REC_ERR_AES)   /* AES failed producing the tag — abort the batch
+                                          rather than write one that can never authenticate */
+        return 0;
     if (flushed && !timed_write(s_ct, flushed, 5))
         return 0;
 
@@ -572,6 +580,9 @@ uint8_t REC_WriteChunk(const int32_t ch1[REC_CHUNK_SAMPLES],
 
     uint32_t n = gcm_update(ch1_bytes, REC_CHUNK_SAMPLES * 4, s_ct);
     n += gcm_update(imu_bytes, CHUNK_IMU_BYTES, s_ct + n);
+    if (s_error_flags & REC_ERR_AES)   /* AES peripheral failed — abort rather than write
+                                          ciphertext that can never authenticate */
+        return 0;
     if (!timed_write(s_ct, n, 5))
         return 0;
     s_payload_bytes += CHUNK_BYTES;
