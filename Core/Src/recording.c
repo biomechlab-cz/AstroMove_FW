@@ -592,6 +592,18 @@ uint8_t REC_WriteChunk(const int32_t ch1[REC_CHUNK_SAMPLES],
     return 1;
 }
 
+#if REC_DIAG_ARTIFACT || REC_DIAG_NOISE
+/* Diagnostic only — see recording.h. Times into s_write_ms like any other write
+   so the CSV still reflects the true storage cost of the probe. */
+void REC_DiagSyncNow(void)
+{
+    if (!s_open) return;
+    uint32_t t0 = HAL_GetTick();
+    f_sync(&s_emgx);
+    s_write_ms += HAL_GetTick() - t0;
+}
+#endif
+
 void REC_Close(void)
 {
     if (!s_open) return;

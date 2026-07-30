@@ -1,3 +1,4 @@
+#include <string.h>
 #include "acquisition.h"
 #include "ads1292.h"
 #include "i2c_sensors.h"
@@ -71,22 +72,132 @@ extern I2C_HandleTypeDef hi2c1;
 
 static FATFS s_fs;
 
+#if REC_DIAG_ARTIFACT
+/* ================= TEMPORARY: artifact / noise hunt =========================
+ * Rotates one condition per batch (10 s) so ONE recording covers every
+ * condition with identical electrodes/skin/environment. Disable via
+ * REC_DIAG_ARTIFACT in recording.h.
+ *
+ * mode = batch_index % DIAG_MODE_COUNT  (derivable from the CSV; no format change)
+ *   0 BASELINE   everything normal — reference
+ *   1 NO_IMU     no I2C traffic at all (sample-and-hold) — DECISIVE test: if the
+ *                1 Hz spike and/or the 100 Hz comb vanish here, I2C is the cause
+ *   2 NO_LED     LED held off — tests LED coupling
+ *   3 PROBE_I2C  normal + a bunched 8x IMU read at DIAG_PROBE_PHASE — positive
+ *                test: does a bunched burst create a spike at that phase?
+ *   4 PROBE_SD   normal + an SD write (f_sync) at DIAG_PROBE_PHASE — positive
+ *                test for SD-write coupling
+ *   5 ISM_ONLY   read only the ISM330 (skip the magnetometer)
+ *   6 MAG_ONLY   read only the magnetometer (skip the ISM330)
+ *   7 BASELINE2  reference repeat — guards against drift/electrode changes
+ * ========================================================================= */
+enum {
+    DIAG_BASELINE = 0, DIAG_NO_IMU, DIAG_NO_LED, DIAG_PROBE_I2C,
+    DIAG_PROBE_SD, DIAG_ISM_ONLY, DIAG_MAG_ONLY, DIAG_BASELINE2,
+    DIAG_MODE_COUNT
+};
+#define DIAG_PROBE_PHASE 500   /* mid-chunk: far from the phase-44 artifact */
+#define DIAG_PROBE_I2C_READS 8 /* mimics the bunched catch-up burst after a write */
+
+static uint32_t s_diag_chunk = 0;        /* chunks since session start */
+volatile uint8_t g_diag_mode = 0;        /* current mode (readable over SWD) */
+
+static uint8_t diag_mode(void)
+{
+    return (uint8_t)((s_diag_chunk / REC_CHUNKS_PER_BATCH) % DIAG_MODE_COUNT);
+}
+
+/* Injected stimulus at a known sample phase, for the positive tests. */
+static void diag_probe(void)
+{
+    switch (diag_mode()) {
+    case DIAG_PROBE_SD:
+        REC_DiagSyncNow();
+        break;
+    case DIAG_PROBE_I2C:
+        for (int i = 0; i < DIAG_PROBE_I2C_READS; i++) {
+            ISM330_Data_t a; MMC5983_Data_t m;
+            (void)ISM330_ReadSample(&a);
+            (void)MMC5983_ReadSample(&m);
+        }
+        break;
+    default:
+        break;
+    }
+}
+#endif /* REC_DIAG_ARTIFACT */
+
+#if REC_DIAG_NOISE
+/* ============ TEMPORARY: noise floor vs SD write rate x magnetometer ========
+ * Full 4x2 factorial, one cell per batch (10 s); phase = batch_index % 8.
+ * Crossing both factors also exposes any interaction between them.
+ *
+ *   write rate = phase >> 1        magnetometer read = even phase
+ *     0  no write   (10 s buffered in RAM, card completely idle while sampling,
+ *                    then flushed in one burst; samples captured during the
+ *                    flush are DISCARDED, so every recorded sample of the batch
+ *                    was taken with zero SD activity)
+ *     1  1 Hz       (normal operation — one chunk write per second)
+ *     2  2 Hz       (chunk write + 1 extra write event mid-chunk)
+ *     3  10 Hz      (chunk write + 9 extra events — deliberate stress test)
+ *
+ *   phase: 0 W0/mag+  1 W0/mag-  2 W1/mag+  3 W1/mag-
+ *          4 W2/mag+  5 W2/mag-  6 W10/mag+ 7 W10/mag-
+ *
+ * Analysis compares the broadband floor across cells with the write windows
+ * excluded, so only a *continuous* effect of SD activity can show up.
+ * ========================================================================== */
+#define NZ_PHASES 8
+#define NZ_BUF_CHUNKS REC_CHUNKS_PER_BATCH   /* one buffered burst == one batch */
+
+/* extra write events per chunk, by write-rate index: 0 samples = none */
+static const uint16_t NZ_SYNC_STEP[4] = { 0, 0, 500, 100 };
+
+static int32_t       s_nzb_ch1[NZ_BUF_CHUNKS][REC_CHUNK_SAMPLES];
+static REC_ImuSample s_nzb_imu[NZ_BUF_CHUNKS][REC_CHUNK_IMU_SAMPLES];
+static struct { uint32_t dropped, sat, flat, drift, leadoff, diff; }
+                     s_nzb_q[NZ_BUF_CHUNKS];
+static uint32_t s_nzb_n     = 0;   /* chunks currently buffered */
+static uint32_t s_nz_chunk  = 0;   /* chunks written so far in a writing phase */
+static uint32_t s_nz_batch  = 0;   /* completed batches — drives the phase */
+volatile uint8_t g_nz_phase = 0;   /* current phase (readable over SWD) */
+
+static uint8_t nz_phase(void)     { return (uint8_t)(s_nz_batch % NZ_PHASES); }
+static uint8_t nz_rate(void)      { return (uint8_t)(nz_phase() >> 1); }   /* 0..3 */
+static uint8_t nz_mag_on(void)    { return (uint8_t)((nz_phase() & 1u) == 0u); }
+static uint8_t nz_buffering(void) { return nz_rate() == 0; }
+#endif /* REC_DIAG_NOISE */
+
 static void imu_sample(REC_ImuSample *out)
 {
     ISM330_Data_t a;
     MMC5983_Data_t m;
-    if (ISM330_ReadSample(&a)) {
-        s_imu_hold.ax = a.ax; s_imu_hold.ay = a.ay; s_imu_hold.az = a.az;
-        s_imu_hold.gx = a.gx; s_imu_hold.gy = a.gy; s_imu_hold.gz = a.gz;
-    } else {
-        g_ism_fail_count++;
-        g_i2c_last_err = hi2c1.ErrorCode;
+    uint8_t read_ism = 1, read_mag = 1;
+#if REC_DIAG_NOISE
+    if (!nz_mag_on()) read_mag = 0;   /* odd phases: silence the 100 Hz comb */
+#endif
+#if REC_DIAG_ARTIFACT
+    uint8_t dm = diag_mode();
+    if (dm == DIAG_NO_IMU) { *out = s_imu_hold; return; }  /* zero I2C traffic */
+    read_ism = (dm != DIAG_MAG_ONLY);
+    read_mag = (dm != DIAG_ISM_ONLY);
+#endif
+    if (read_ism) {
+        if (ISM330_ReadSample(&a)) {
+            s_imu_hold.ax = a.ax; s_imu_hold.ay = a.ay; s_imu_hold.az = a.az;
+            s_imu_hold.gx = a.gx; s_imu_hold.gy = a.gy; s_imu_hold.gz = a.gz;
+        } else {
+            g_ism_fail_count++;
+            g_i2c_last_err = hi2c1.ErrorCode;
+        }
     }
-    if (MMC5983_ReadSample(&m)) {
-        s_imu_hold.mx = m.mx; s_imu_hold.my = m.my; s_imu_hold.mz = m.mz;
-    } else {
-        g_mag_fail_count++;
-        g_i2c_last_err = hi2c1.ErrorCode;
+    if (read_mag) {
+        if (MMC5983_ReadSample(&m)) {
+            s_imu_hold.mx = m.mx; s_imu_hold.my = m.my; s_imu_hold.mz = m.mz;
+        } else {
+            g_mag_fail_count++;
+            g_i2c_last_err = hi2c1.ErrorCode;
+        }
     }
     *out = s_imu_hold;
 }
@@ -438,6 +549,41 @@ uint16_t ACQ_SyncSeed(void)
     return g_sync_seed;
 }
 
+#if REC_DIAG_NOISE
+/* Route a completed chunk per the current phase. Same contract as
+   REC_WriteChunk: returns 0 on an unrecoverable storage failure. */
+static uint8_t nz_handle_chunk(uint32_t dropped, uint32_t sat,
+                               const ACQ_SignalQuality *q)
+{
+    if (nz_buffering()) {
+        uint32_t i = s_nzb_n;
+        memcpy(s_nzb_ch1[i], s_ch1, sizeof(s_ch1));
+        memcpy(s_nzb_imu[i], s_imu, sizeof(s_imu));
+        s_nzb_q[i].dropped = dropped;              s_nzb_q[i].sat   = sat;
+        s_nzb_q[i].flat    = q->flatline_chunks;   s_nzb_q[i].drift = q->baseline_drift_chunks;
+        s_nzb_q[i].leadoff = q->leadoff_chunks;    s_nzb_q[i].diff  = q->diff_abs_sum;
+        if (++s_nzb_n < NZ_BUF_CHUNKS)
+            return 1;                    /* still buffering — the card stays idle */
+
+        for (i = 0; i < NZ_BUF_CHUNKS; i++)          /* flush the burst at once */
+            if (!REC_WriteChunk(s_nzb_ch1[i], s_nzb_imu[i], s_nzb_q[i].dropped,
+                                s_nzb_q[i].sat, s_nzb_q[i].flat, s_nzb_q[i].drift,
+                                s_nzb_q[i].leadoff, s_nzb_q[i].diff))
+                return 0;
+        s_nzb_n = 0;
+        s_nz_batch++;
+        ACQ_ResetRing();   /* discard everything captured during the flush */
+        return 1;
+    }
+
+    if (!REC_WriteChunk(s_ch1, s_imu, dropped, sat, q->flatline_chunks,
+                        q->baseline_drift_chunks, q->leadoff_chunks, q->diff_abs_sum))
+        return 0;
+    if (++s_nz_chunk >= NZ_BUF_CHUNKS) { s_nz_chunk = 0; s_nz_batch++; }
+    return 1;
+}
+#endif
+
 void ACQ_Process(void)
 {
     /* Status LED — pick the highest-priority condition currently active.
@@ -452,10 +598,32 @@ void ACQ_Process(void)
         led = LED_LEADOFF;  /* hard bad contact / unusable signal */
     if (s_warn_on)        led = LED_WARN;
     LED_SetState(led);
+#if REC_DIAG_ARTIFACT
+    g_diag_mode = diag_mode();
+    LED_Mute(g_diag_mode == DIAG_NO_LED);
+#endif
+#if REC_DIAG_NOISE
+    g_nz_phase = nz_phase();
+#endif
 
     while (s_ring_tail != s_ring_head) {
         if (s_count % (REC_CHUNK_SAMPLES / REC_CHUNK_IMU_SAMPLES) == 0)
             imu_sample(&s_imu[s_count / (REC_CHUNK_SAMPLES / REC_CHUNK_IMU_SAMPLES)]);
+#if REC_DIAG_ARTIFACT
+        /* Inject the mode's stimulus at a known sample phase. The samples the ISR
+           captures during it land at phase DIAG_PROBE_PHASE.. so a coupling shows
+           up as a fresh peak there. */
+        if (s_count == DIAG_PROBE_PHASE)
+            diag_probe();
+#endif
+#if REC_DIAG_NOISE
+        /* Extra write events inside the chunk, raising the write rate above 1 Hz. */
+        {
+            uint16_t step = NZ_SYNC_STEP[nz_rate()];
+            if (step && s_count && (s_count % step) == 0)
+                REC_DiagSyncNow();
+        }
+#endif
 
         s_ch1[s_count] = s_ring_ch1[s_ring_tail];
         s_ring_tail = (uint16_t)((s_ring_tail + 1) & RING_MASK);
@@ -472,11 +640,15 @@ void ACQ_Process(void)
 
             ACQ_SignalQuality quality = analyze_signal_quality(s_ch1);
 
+#if REC_DIAG_NOISE
+            if (!nz_handle_chunk(dropped, saturated, &quality)) {
+#else
             if (!REC_WriteChunk(s_ch1, s_imu, dropped, saturated,
                                 quality.flatline_chunks,
                                 quality.baseline_drift_chunks,
                                 quality.leadoff_chunks,
                                 quality.diff_abs_sum)) {
+#endif
                 LED_SetState(LED_FAULT_STORAGE);  /* SysTick keeps the pattern alive */
                 while (1) { }
             }
@@ -490,6 +662,9 @@ void ACQ_Process(void)
                 s_warn_deadline = tick + QUALITY_HOLD_MS;
                 s_warn_on = 1;
             }
+#if REC_DIAG_ARTIFACT
+            s_diag_chunk++;   /* advance the experiment clock (mode changes per batch) */
+#endif
         }
     }
 }

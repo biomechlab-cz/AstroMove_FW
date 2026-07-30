@@ -64,4 +64,9 @@ void LED_SetState(LED_State s);
    SysTick_Handler(). */
 void LED_Tick(void);
 
+/* Diagnostic: while muted the LED is held off (the pattern keeps running, only
+   the pin output is suppressed). Used by the artifact hunt to test whether the
+   LED wink couples into the analog front end. */
+void LED_Mute(uint8_t mute);
+
 #endif /* LED_H */

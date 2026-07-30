@@ -14,6 +14,16 @@
  * plus REC_CHUNK_IMU_SAMPLES IMU samples. REC_CHUNKS_PER_BATCH chunks form
  * one independently encrypted batch (AES-256-GCM, hardware accelerated). */
 
+/* ============ TEMPORARY DIAGNOSTIC BUILD — artifact/noise hunt =============
+ * Set to 0 (and rebuild) to restore normal firmware behaviour; the whole
+ * feature is compiled out. While 1, acquisition.c rotates ONE experimental
+ * condition per batch (10 s) so a single recording contains every condition
+ * under identical electrode conditions. See DIAG_* in acquisition.c.
+ * DO NOT SHIP WITH THIS ENABLED.
+ * ========================================================================= */
+#define REC_DIAG_ARTIFACT      0   /* experiment 1: which activity causes the artifacts (DONE) */
+#define REC_DIAG_NOISE         0   /* experiment 2: noise floor vs SD write rate (DONE) */
+
 #define REC_CHUNK_SAMPLES      1000 /* EMG samples per chunk (1 s at 1 kHz) */
 #define REC_CHUNK_IMU_SAMPLES  100  /* IMU samples per chunk (1 s at 100 Hz) */
 #define REC_CHUNKS_PER_BATCH   10   /* batch duration in seconds */
@@ -82,5 +92,13 @@ uint8_t REC_WriteChunk(const int32_t ch1[REC_CHUNK_SAMPLES],
 /* Finalize an in-progress batch (marked REC_ERR_PARTIAL) and close both
    files. Safe to call when nothing is open. */
 void REC_Close(void);
+
+#if REC_DIAG_ARTIFACT || REC_DIAG_NOISE
+/* Diagnostic probe: force an SD card write NOW (f_sync of the .EMX file) so a
+   card write lands at a known sample phase. Safe — this is the same call the
+   batch boundary already makes; it only flushes, it never alters file content.
+   (_FS_LOCK is 2 and both slots are used, so a scratch file is not an option.) */
+void REC_DiagSyncNow(void);
+#endif
 
 #endif /* RECORDING_H */

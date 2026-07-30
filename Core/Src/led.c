@@ -30,6 +30,9 @@ static const led_pattern_t PATTERNS[LED_STATE_COUNT] = {
 static volatile LED_State s_state    = LED_BOOT;
 static volatile uint16_t  s_phase_ms = 0;
 static uint8_t            s_inited   = 0;
+static volatile uint8_t   s_mute     = 0;   /* diagnostic: hold the LED off */
+
+void LED_Mute(uint8_t mute) { s_mute = mute ? 1 : 0; }
 
 static int led_is_fault(LED_State s)
 {
@@ -82,6 +85,7 @@ void LED_Tick(void)
     if (++s_phase_ms >= p->period_ms)
         s_phase_ms = 0;
     int on = pattern_on(p, s_phase_ms);
+    if (s_mute) on = 0;
 #if LED_HW_RGB
     led_write(on ? p->r : 0, on ? p->g : 0, on ? p->b : 0);
 #else

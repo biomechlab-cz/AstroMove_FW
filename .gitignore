@@ -7,3 +7,13 @@ build
 ._*
 .DS_Store
 __pycache__/
+
+# Signal-investigation material — kept out of the repo entirely:
+# measurement results, generated reports, and the report generator itself.
+# Only the firmware instrumentation (REC_DIAG_* in recording.h) is tracked.
+artifacts/
+NOISE_REPORT.html
+NOISE_REPORT.md
+tools/make_noise_report.py
+*_data.csv
+*_imu.csv
